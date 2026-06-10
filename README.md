@@ -2,6 +2,8 @@
 
 A multimodal LLM agent CLI with **MCP (Model Context Protocol)** support. Stream text and images to an LLM server, give the model tools via MCP, and interact through several UI modes — a simple one-shot console, an interactive terminal loop, a rich Textual TUI, or an HTTP API server.
 
+![Screenshot](docs/alexis-tui-screenshot.jpg "Screenshot")
+
 The architecture is built around two independent plugin systems:
 
 - **LLM drivers** — choose the backend provider (`llama`, `gemini`).
