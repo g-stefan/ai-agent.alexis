@@ -1,0 +1,20 @@
+# Non-package data shipped with the source distribution.
+# The agent loads these relative to its own location at runtime.
+include version.json
+include requirements.txt
+include README.md
+include LICENSE*
+include config.jsonc.example
+
+# Bundled MCP server scripts (mcp/ is not an importable package on purpose,
+# so its files must be listed explicitly).
+recursive-include mcp *.py
+
+# Bundled agent skills / system prompt.
+recursive-include .agents *
+
+# Extended documentation.
+recursive-include docs *.md
+
+# Keep build noise out of the sdist.
+global-exclude __pycache__ *.py[cod]

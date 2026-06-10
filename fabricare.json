@@ -1,0 +1,14 @@
+{
+	"solution": {
+		"name" : "ai-agent.alexis",
+		"type" : "generic",
+		"projects": [
+			{
+				"name" : "ai-agent.alexis",
+				"SPDX-License-Identifier": "Apache-2.0",
+				"previousVersion" : "0.1.0"
+			}
+		],
+		"releaseOutput" : true
+	}
+}

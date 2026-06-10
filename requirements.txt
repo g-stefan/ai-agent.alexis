@@ -1,0 +1,9 @@
+# Core dependencies
+mcp>=0.1.0
+
+# Optional: For API server mode
+aiohttp>=3.8.0
+aiohttp_cors>=0.7.0
+
+# Optional: For advanced interactive TUI with mouse support
+textual>=0.30.0
