@@ -345,6 +345,22 @@ def http_stream_reader(req: urllib.request.Request, queue: asyncio.Queue, loop: 
         except Exception:
             pass
 
+# Message keys that exist only for the UI/history (e.g. attachment metadata)
+# and must be removed before a message is forwarded to the LLM, whose schema
+# only accepts role/content/tool fields.
+UI_ONLY_MESSAGE_KEYS = ("attachments",)
+
+
+def strip_ui_keys(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return messages with UI-only keys removed (originals left untouched)."""
+    cleaned = []
+    for m in messages:
+        if isinstance(m, dict) and any(k in m for k in UI_ONLY_MESSAGE_KEYS):
+            m = {k: v for k, v in m.items() if k not in UI_ONLY_MESSAGE_KEYS}
+        cleaned.append(m)
+    return cleaned
+
+
 async def chat_loop(
     driver: LLMDriver,
     messages: List[Dict[str, Any]],
@@ -382,7 +398,7 @@ async def chat_loop(
             break
 
         data = driver.prepare_request_data(
-            messages=messages,
+            messages=strip_ui_keys(messages),
             tools=tools,
             model=model,
             temperature=temperature,
@@ -843,7 +859,8 @@ async def chat_loop(
                 display_args = args_str if len(args_str) <= 60 else args_str[:57] + "..."
                 print(f"\033[93m[*] Model executing tool: {name}({display_args})\033[0m", file=sys.stderr)
                 if stream_queue:
-                    stream_queue.put_nowait({"type": "tool_call", "name": name, "arguments": args_str})
+                    stream_queue.put_nowait({"type": "tool_call", "name": name, "arguments": args_str,
+                                             "bytes": len((args_str or "").encode("utf-8"))})
                 
                 try:
                     args_dict = json.loads(args_str) if args_str else {}
@@ -893,7 +910,8 @@ async def chat_loop(
                     # `full` before serializing — see ui_driver_api.
                     summary = full[:1500] + ("..." if len(full) > 1500 else "")
                     stream_queue.put_nowait({"type": "tool_result", "name": name,
-                                             "data": summary, "full": full})
+                                             "data": summary, "full": full,
+                                             "bytes": len(full.encode("utf-8"))})
 
                 messages.append({
                     "role": "tool",
@@ -1093,7 +1111,7 @@ async def async_main():
 
     # New interactive and API mode arguments
     parser.add_argument("-i", "--interactive", action="store_true", help="Start an interactive terminal chat loop.")
-    parser.add_argument("--api-port", type=int, default=None, help="Start an HTTP API server on this port for GUI clients (SSE streaming).")
+    parser.add_argument("--api-port", type=int, default=None, help="Start an HTTP API server on this port for GUI clients (SSE streaming). Defaults to 48010 in API mode if not set.")
     parser.add_argument("--api-host", type=str, default="127.0.0.1", help="Host interface for the API server (default: 127.0.0.1).")
 
     # Agent-as-MCP-server (Subagent) mode
@@ -1161,6 +1179,12 @@ async def async_main():
             args.ui_driver = "api"
         elif args.interactive:
             args.ui_driver = "interactive"
+
+    # In API mode, fall back to the default port when one wasn't given explicitly
+    # (e.g. `--ui-driver api` with no `--api-port`). --api-port keeps a None
+    # default so it can still act as the api-mode trigger above.
+    if args.ui_driver == "api" and not args.api_port:
+        args.api_port = 48010
 
     # Bundled MCP servers: for each enabled --agent-use-mcp-<name>, attach
     # mcp/mcp-server-<name>.py (stdio), apply its env defaults, and remember the
@@ -1834,6 +1858,7 @@ async def async_main():
                 messages=messages,
                 save_state=save_state,
                 user_content=user_content,
+                llm_driver=llm_driver,
                 api_host=args.api_host,
                 api_port=args.api_port,
                 session_path=args.session,
