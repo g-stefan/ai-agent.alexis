@@ -18,14 +18,27 @@ The architecture is built around two independent plugin systems:
 
 ## Installation
 
-The project installs as an **editable** package, which exposes an `alexis` command in your terminal. Editable install is the supported method: the agent re-spawns itself as a subprocess and loads bundled MCP servers (`mcp/`) and skills (`skills/`) relative to its own location, so the files must stay in place.
+The project is a standard `src/`-layout package that exposes an `alexis` command
+in your terminal. Bundled MCP servers, the web UI, and the version file ship
+**inside** the `alexis` package and are located at runtime via
+`importlib.resources`, so a normal wheel install works the same as an editable
+one — the agent re-spawns itself with `python -m alexis`, not a loose script path.
 
 ```bash
-# from the project root
-pip install -e .            # core (MCP)
-pip install -e ".[api]"     # + HTTP API server mode (aiohttp)
-pip install -e ".[tui]"     # + Textual TUI
-pip install -e ".[all]"     # everything
+# regular install (from the project root, a built wheel, or — once published — PyPI)
+pip install .               # core (MCP)
+pip install ".[api]"        # + HTTP API server mode (aiohttp)
+pip install ".[tui]"        # + Textual TUI
+pip install ".[all]"        # everything
+
+# build distributable artifacts
+python -m build             # -> dist/*.whl and dist/*.tar.gz
+
+# isolated CLI install (recommended for a tool)
+pipx install .              # or: pipx install dist/alexis-*.whl
+
+# editable install for development
+pip install -e ".[all]"
 ```
 
 After installing, you can run the agent from anywhere:
@@ -234,18 +247,31 @@ The auto-generated `--agent-use-mcp-<name>` flags (and their `--no-` forms) are 
 
 ## Project layout
 
+`src/` layout — a single import package `alexis` so the project installs cleanly
+as a wheel and can be embedded (`import alexis`) as well as run as a CLI:
+
 ```
-alexis.py                 # CLI entry point (the `alexis` command -> main())
-alexis_version.py         # App name + version, sourced from version.json
-version.json              # Single source of truth for the version
-pyproject.toml            # Packaging / console-script definition
-ui/                       # UI drivers (ui_driver_*.py) + factory
-model/                    # LLM drivers (llm_driver_*.py) + factory
-mcp/                      # Bundled MCP server scripts
-docs/                     # Extended documentation
+pyproject.toml                   # Packaging / console-script definition
+src/alexis/
+  __init__.py                    # Light package init (exposes __version__)
+  __main__.py                    # `python -m alexis` entry
+  cli.py                         # CLI entry point (the `alexis` command -> main())
+  version.py                     # App name + version, sourced from data/version.json
+  config.py                      # config.jsonc loader
+  data/version.json              # Single source of truth for the version
+  ui/                            # UI drivers (ui_driver_*.py) + factory + web UI html
+  model/                         # LLM drivers (llm_driver_*.py) + factory
+  mcp/                           # Bundled MCP server scripts (shipped as package data)
+docs/                            # Extended documentation
 ```
 
-The version shown in the startup header, the `--version` flag, and the TUI title all read from `version.json`. Bump the version there and everything updates automatically.
+Bundled data (the MCP server scripts, the web-UI HTML, `version.json`) lives
+inside the package and is located at runtime via `importlib.resources`, so it
+works identically from source, an editable install, or an installed wheel.
+
+The version shown in the startup header, the `--version` flag, and the TUI title
+all read from `src/alexis/data/version.json`. Bump the version there and
+everything updates automatically.
 
 ---
 

@@ -18,17 +18,32 @@ import ssl
 import itertools
 import socket
 import re
+import importlib.resources
 from urllib.error import URLError, HTTPError
 from typing import Optional, Dict, Any, List, Tuple
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 
-from model.llm_driver_factory import create_llm_driver, get_available_drivers as get_llm_drivers
-from model.llm_driver import LLMDriver
-from ui.ui_driver_factory import create_ui_driver, get_available_driver_names as get_ui_driver_names
-from ui.ui_driver import UIDriver
-import alexis_version
-import alexis_config
+from .model.llm_driver_factory import create_llm_driver, get_available_drivers as get_llm_drivers
+from .model.llm_driver import LLMDriver
+from .ui.ui_driver_factory import create_ui_driver, get_available_driver_names as get_ui_driver_names
+from .ui.ui_driver import UIDriver
+from . import version as alexis_version
+from . import config as alexis_config
+
+
+def package_dir() -> str:
+    """Filesystem path to the installed ``alexis`` package directory.
+
+    This is the "agent program folder" — the root under which bundled skills
+    (``skills/``), the bundled ``SYSTEM.md``, and the bundled MCP servers
+    (``mcp/``) live. Uses importlib.resources so it resolves correctly whether
+    running from source, an editable install, or a wheel; falls back to a
+    ``__file__``-relative path if resources can't locate the package."""
+    try:
+        return os.fspath(importlib.resources.files(__package__))
+    except Exception:
+        return os.path.dirname(os.path.abspath(__file__))
 
 def log_debug(filepath: Optional[str], log_type: str, data: Any) -> None:
     """Logs the API request or response chunk to a JSONL file."""
@@ -148,6 +163,22 @@ def discover_skills(skills_dir: str) -> List[Tuple[str, str, str]]:
     return found
 
 
+def discover_all_skills() -> List[Tuple[str, str, str]]:
+    """Discover skills across every agent root (program folder, ~/.alexis,
+    .agents — see ``agent_skill_roots``), deduped by name with earlier roots
+    winning. Shared by the system-prompt skills section and the UI skills count
+    so both report exactly the same set."""
+    skills: List[Tuple[str, str, str]] = []
+    seen: set = set()
+    for root in agent_skill_roots():
+        for name, desc, path in discover_skills(os.path.join(root, "skills")):
+            if name in seen:
+                continue
+            seen.add(name)
+            skills.append((name, desc, path))
+    return skills
+
+
 def build_skills_prompt(skills: List[Tuple[str, str, str]]) -> str:
     """Render the discovered skills as a system-prompt section. Follows the
     progressive-disclosure model: only names + descriptions are shown; the
@@ -185,24 +216,34 @@ def alexis_home() -> str:
 
 def agent_skill_roots() -> List[str]:
     """Return the folder roots to search for skills, in precedence order:
-    the current project's ``.agents`` first, then the user's home ``~/.alexis``
-    (override via ``AI_AGENT_ALEXIS_HOME``). A project skill overrides a user
-    skill of the same name.
 
-    The agent's *own* bundled skills (shipped next to this script) are
-    deliberately NOT searched: when ``alexis`` is installed and run from an
-    unrelated project, it must not self-reference the package folder's skills.
-    User-global skills live under ``~/.alexis/skills`` instead.
+      1. the agent program folder (skills bundled next to this script),
+      2. the user's home ``~/.alexis`` (override via ``AI_AGENT_ALEXIS_HOME``),
+      3. the current project's ``.agents``.
+
+    Skills live under ``<root>/skills/``. The list is searched left to right and
+    the first match wins, so a program-bundled skill shadows a user skill, which
+    in turn shadows a project skill of the same name.
 
     Shared by the system-prompt skill discovery (--agent-use-skills) and the
     skills MCP server's search path (MCP_SKILLS_AGENT_DIR), so the model is told
     about exactly the skills the server can run."""
-    roots = [".agents"]
-    home = alexis_home()
-    # Skills live under <root>/skills/. Add the user home unless it resolves to
-    # the project root already (avoids a duplicate when run from ~/.alexis).
-    if os.path.abspath(home) != os.path.abspath(".agents"):
-        roots.append(home)
+    candidates = [
+        package_dir(),    # agent program folder (the installed package)
+        alexis_home(),    # user-global ~/.alexis
+        ".agents",        # current project .agents
+    ]
+    # Drop any root that resolves to the same directory as an earlier one
+    # (e.g. running from the program folder, or AI_AGENT_ALEXIS_HOME pointing at
+    # it) so a skill is never discovered twice.
+    roots: List[str] = []
+    seen = set()
+    for root in candidates:
+        key = os.path.abspath(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
     return roots
 
 
@@ -211,7 +252,7 @@ def mcp_server_dirs() -> List[str]:
     order: the agent's own bundled ``mcp/`` (next to this script) first, then the
     user's ``~/.alexis/mcp`` (override the home via ``AI_AGENT_ALEXIS_HOME``) for
     user-provided servers."""
-    dirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp")]
+    dirs = [os.path.join(package_dir(), "mcp")]
     home_mcp = os.path.join(alexis_home(), "mcp")
     if os.path.abspath(home_mcp) != os.path.abspath(dirs[0]):
         dirs.append(home_mcp)
@@ -280,7 +321,7 @@ def bundled_mcp_help(name: str) -> str:
     """Help text for the --agent-use-mcp-<name> flag of a bundled server."""
     known = {
         "workspace": "Attach the bundled workspace filesystem MCP server (mcp/mcp-server-workspace.py) for file operations — equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-workspace.py --stdio\" --mcp-env-base WORKSPACE'. Defaults WORKSPACE_DIR=. and WORKSPACE_HIDE_DOT_DIRS=yes when unset. Forwarded to subagents.",
-        "skills": "Attach the bundled skills MCP server (mcp/mcp-server-skills.py) so the model can run scripts bundled with skills — equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-skills.py --stdio\" --mcp-env-base MCP_SKILLS'. MCP_SKILLS_AGENT_DIR is a ';'-separated search path; defaults to the current .agents then the user-global ~/.alexis (override via AI_AGENT_ALEXIS_HOME). Forwarded to subagents.",
+        "skills": "Attach the bundled skills MCP server (mcp/mcp-server-skills.py) so the model can run scripts bundled with skills — equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-skills.py --stdio\" --mcp-env-base MCP_SKILLS'. MCP_SKILLS_AGENT_DIR is a ';'-separated search path; defaults to the agent program folder, then the user-global ~/.alexis (override via AI_AGENT_ALEXIS_HOME), then the current .agents. Forwarded to subagents.",
     }
     return known.get(
         name,
@@ -1072,7 +1113,7 @@ async def async_main():
     parser.add_argument("--cmd", action="store_true", help="Clean/command mode for scripts and CI: reset all the on-by-default capabilities (--agent-use-system-md/-agents-md/-skills, --agent-use-mcp-<name>, --agent-internal-mcp-subagent) to OFF and default --ui-driver to 'simple', and ignore the [agent] section of config.jsonc. Provider connection settings still apply; opt back into any capability with its explicit --agent-use-* flag (which always wins).")
     parser.add_argument("--agent-use-system-md", action=argparse.BooleanOptionalAction, default=None, help="Prepend .agents/SYSTEM.md (from the current folder) to the system prompt when it exists. The user-global ~/.alexis/SYSTEM.md (override home via AI_AGENT_ALEXIS_HOME) is always included when present, regardless of this flag. (default: on; use --no-agent-use-system-md to disable)")
     parser.add_argument("--agent-use-agents-md", action=argparse.BooleanOptionalAction, default=None, help="Append AGENTS.md (from the current folder) to the system prompt when it exists. (default: on; use --no-agent-use-agents-md to disable)")
-    parser.add_argument("--agent-use-skills", action=argparse.BooleanOptionalAction, default=None, help="Discover skills (Agent Skills protocol) and add their names/descriptions to the system prompt. Searches the project's .agents/skills/ first, then the user-global ~/.alexis/skills/ (override home via AI_AGENT_ALEXIS_HOME). (default: on; use --no-agent-use-skills to disable)")
+    parser.add_argument("--agent-use-skills", action=argparse.BooleanOptionalAction, default=None, help="Discover skills (Agent Skills protocol) and add their names/descriptions to the system prompt. Searches the agent program folder's skills/ first, then the user-global ~/.alexis/skills/ (override home via AI_AGENT_ALEXIS_HOME), then the current .agents/skills/. (default: on; use --no-agent-use-skills to disable)")
     parser.add_argument("--images", type=str, nargs='+', help="Path(s) to image files to include in the prompt.")
     parser.add_argument("--assets", type=str, nargs='+', help="Path(s) to folder(s) containing image (png, jpg, jpeg) files to automatically include in the prompt.")
     parser.add_argument("--mcp", type=str, action=MCPAppendAction, nargs='+', help="Commands to start MCP servers (e.g., 'npx -y ...') or HTTP URLs ('http://.../sse' for SSE, 'http://.../mcp' for Streamable HTTP). Can be specified multiple times.")
@@ -1317,11 +1358,13 @@ async def async_main():
     if _subagent_level is None:
         _subagent_level = 3
     if getattr(args, 'agent_internal_mcp_subagent', False) and _subagent_level > 0:
-        self_script = os.path.abspath(__file__)
         child_level = _subagent_level - 1
         tree_on = getattr(args, 'agent_subagent_tree', False)
         done_on = getattr(args, 'mcp_subagent_use_processing_done', False)
-        parts = [sys.executable, self_script, "--agent-as-mcp-server",
+        # Relaunch this package as a subagent MCP server via ``python -m alexis``
+        # so the child runs with the proper package context (relative imports
+        # work); running the module file directly would break ``from .model ...``.
+        parts = [sys.executable, "-m", __package__, "--agent-as-mcp-server",
                  "--agent-mcp-transport", "stdio"]
         # LLM connection + generation settings (mirror the main agent).
         parts += ["--llm-driver", args.llm_driver, "--url", args.url,
@@ -1516,10 +1559,14 @@ async def async_main():
             print(f"\033[91m[!] Error loading tool session '{args.tool_session}': {e}\033[0m", file=sys.stderr)
             sys.exit(1)
 
-    # System Message — assembled, in order, from:
-    #   1. .agents/SYSTEM.md  (--agent-use-system-md, if the file exists)
-    #   2. AGENTS.md          (--agent-use-agents-md, if the file exists)
-    #   3. --system file      (explicit path, kept for backward compatibility)
+    # System Message — assembled, in order, from (each doc searches its base
+    # layers <program folder>/ then ~/.alexis/, always loaded when present and
+    # deduped, before its project-local file):
+    #   1. SYSTEM.md    base layers, then .agents/SYSTEM.md (--agent-use-system-md)
+    #   2. AGENTS.md    base layers + CWD AGENTS.md          (--agent-use-agents-md)
+    #   3. skills       (--agent-use-skills)
+    #   4. SUBAGENTS.md base layers + CWD SUBAGENTS.md       (subagent mode only)
+    #   5. --system file                                     (explicit path, backward compat)
     # Only injected when the session doesn't already carry a system message.
     if not any(m.get("role") == "system" for m in messages):
         system_parts = []
@@ -1541,30 +1588,40 @@ async def async_main():
                 print(f"\033[91m[!] Error reading '{path}': {e}\033[0m", file=sys.stderr)
                 sys.exit(1)
 
-        # User-global system prompt: ~/.alexis/SYSTEM.md (override the home via
-        # AI_AGENT_ALEXIS_HOME). Always included when present so the user's
-        # personal agent persona applies regardless of project-level flags. Goes
-        # first so project .agents/SYSTEM.md and --system can refine it.
-        _home_system = os.path.join(alexis_home(), "SYSTEM.md")
-        if os.path.isfile(_home_system):
-            _read_system_source(_home_system, "user system prompt (~/.alexis)", required=False)
+        # Base layers for a doc, always included when present so the agent's
+        # bundled and user-global copies apply regardless of project-level flags.
+        # Searches <program folder>/<filename> then ~/.alexis/<filename> (override
+        # the home via AI_AGENT_ALEXIS_HOME), mirroring the agent_skill_roots()
+        # order minus the project layer (which each caller adds itself). Deduped
+        # by absolute path so a single file isn't loaded twice (e.g. when
+        # AI_AGENT_ALEXIS_HOME points at the program folder). Layering is "later
+        # refines earlier", so the project file and --system come after these.
+        _program_dir = package_dir()
+
+        def _read_base_layers(filename, label):
+            seen = set()
+            for base, where in ((_program_dir, "program"), (alexis_home(), "~/.alexis")):
+                path = os.path.join(base, filename)
+                key = os.path.abspath(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if os.path.isfile(path):
+                    _read_system_source(path, f"{label} [{where}]", required=False)
+
+        _read_base_layers("SYSTEM.md", "system prompt")
         if getattr(args, 'agent_use_system_md', False):
             _read_system_source(os.path.join(".agents", "SYSTEM.md"), "agent system prompt", required=False)
         if getattr(args, 'agent_use_agents_md', False):
+            _read_base_layers("AGENTS.md", "agent guidance")
             _read_system_source("AGENTS.md", "agent guidance", required=False)
         if getattr(args, 'agent_use_skills', False):
-            # Search every agent root (project first, then bundled). Dedupe by
-            # skill name so an earlier (project) skill shadows a bundled one of
-            # the same name — matching the skills MCP server's resolution order.
+            # Search every agent root (program folder, then ~/.alexis, then
+            # .agents), deduping by skill name so an earlier root's skill shadows
+            # a later one of the same name — matching the skills MCP server's
+            # resolution order.
             searched_dirs = [os.path.join(r, "skills") for r in agent_skill_roots()]
-            skills = []
-            seen_names = set()
-            for skills_dir in searched_dirs:
-                for name, desc, path in discover_skills(skills_dir):
-                    if name in seen_names:
-                        continue
-                    seen_names.add(name)
-                    skills.append((name, desc, path))
+            skills = discover_all_skills()
             if skills:
                 system_parts.append(build_skills_prompt(skills))
                 print(f"\033[94m[*] Loaded {len(skills)} skill(s) from {', '.join(searched_dirs)}\033[0m", file=sys.stderr)
@@ -1572,7 +1629,11 @@ async def async_main():
                 print(f"\033[90m[*] No skills found under {', '.join(searched_dirs)}, skipping.\033[0m", file=sys.stderr)
         # In subagent mode, append SUBAGENTS.md (after SYSTEM.md/AGENTS.md/SKILLS)
         # so the agent knows it is acting as a subagent and what its role is.
+        # Same base layers as the others — bundled and user-global SUBAGENTS.md —
+        # followed by the project-local file; only loaded when acting as a
+        # subagent, since the doc is meaningless otherwise.
         if is_subagent_server:
+            _read_base_layers("SUBAGENTS.md", "subagent role")
             _read_system_source("SUBAGENTS.md", "subagent role", required=False)
         if args.system:
             _read_system_source(args.system, "system message", required=True)
@@ -1942,6 +2003,12 @@ async def async_main():
         if is_subagent_server:
             await run_as_subagent_server()
         else:
+            # Skills count for the UI panel: None when skills are disabled (panel
+            # hidden), otherwise the number discovered across all agent roots.
+            skills_count = (
+                len(discover_all_skills())
+                if getattr(args, 'agent_use_skills', False) else None
+            )
             # Run the UI driver
             await ui_driver.run(
                 run_single_turn=run_single_turn,
@@ -1955,6 +2022,7 @@ async def async_main():
                 context_limit=args.context_limit,
                 reasoning_effort=args.reasoning_effort,
                 mcp_servers=mcp_server_names,
+                skills_count=skills_count,
                 reset_session=reset_session,
                 join_tool_processing=args.join_tool_processing,
             )

@@ -10,7 +10,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from .ui_driver import UIDriver
-import alexis_version
+from .. import version as alexis_version
 
 try:
     from textual.app import ComposeResult, App
@@ -223,6 +223,19 @@ if TEXTUAL_AVAILABLE:
             t = Text("MCP SERVERS\n", style="bold cyan")
             for name in self._servers:
                 t.append(f"{name}\n", style="yellow")
+            return t
+
+    class SkillsPanel(Static):
+        """Right-panel widget showing how many skills were discovered. Only
+        mounted when skills are enabled via the --agent-use-skills flag."""
+
+        def __init__(self, count: int, **kwargs):
+            super().__init__(**kwargs)
+            self._count = count
+
+        def render(self):
+            t = Text("SKILLS\n", style="bold cyan")
+            t.append(f"{self._count}\n", style="yellow")
             return t
 
 
@@ -1209,6 +1222,9 @@ if TEXTUAL_AVAILABLE:
         #mcp-servers {
             height: auto;
         }
+        #skills {
+            height: auto;
+        }
 
         #input {
             height: auto;
@@ -1499,7 +1515,7 @@ if TEXTUAL_AVAILABLE:
 
         def __init__(self, context_limit=None, run_callback=None, messages=None,
                      save_state=None, session_path=None, thinking_enabled=False,
-                     mcp_servers=None, reset_session=None,
+                     mcp_servers=None, skills_count=None, reset_session=None,
                      join_tool_processing=True):
             super().__init__()
             self.context_limit = context_limit
@@ -1512,6 +1528,9 @@ if TEXTUAL_AVAILABLE:
             self.session_path = session_path
             self.thinking_enabled = thinking_enabled
             self.mcp_servers = mcp_servers or []
+            # Number of discovered skills, or None when skills are disabled
+            # (--no-agent-use-skills) — the SKILLS panel is hidden in that case.
+            self.skills_count = skills_count
             # Backend hook to start a fresh session (clears history, rotates the
             # session file). Optional — falls back to a local clear if absent.
             self.reset_session = reset_session
@@ -1529,6 +1548,8 @@ if TEXTUAL_AVAILABLE:
                 with VerticalScroll(id="stats"):
                     if self.mcp_servers:
                         yield MCPServersPanel(self.mcp_servers, id="mcp-servers")
+                    if self.skills_count is not None:
+                        yield SkillsPanel(self.skills_count, id="skills")
                     yield StatisticsPanel(id="stats-numbers")
                     yield ContextMap(id="context-map")
             yield MultiLineInput(id="input")
@@ -2151,6 +2172,7 @@ class TextualInteractiveUIDriver(UIDriver):
                 session_path=kwargs.get("session_path"),
                 thinking_enabled=bool(kwargs.get("reasoning_effort")),
                 mcp_servers=kwargs.get("mcp_servers", []),
+                skills_count=kwargs.get("skills_count"),
                 reset_session=kwargs.get("reset_session"),
                 join_tool_processing=kwargs.get("join_tool_processing", True),
             )

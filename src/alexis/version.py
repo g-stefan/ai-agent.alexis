@@ -10,18 +10,33 @@ startup header and the interactive UI title.
 
 import json
 import os
+import importlib.resources
 
 APP_NAME = "AI-Agent.Alexis"
 APP_KEY = "ai-agent.alexis"
 
-_VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+
+def _read_version_json() -> str:
+    """Return the raw text of the bundled ``data/version.json``.
+
+    Resolved via importlib.resources so it works from source, an editable
+    install, or inside a wheel; falls back to a ``__file__``-relative path."""
+    try:
+        return (
+            importlib.resources.files(__package__)
+            .joinpath("data", "version.json")
+            .read_text(encoding="utf-8")
+        )
+    except Exception:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "version.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
 
 
 def _load_info() -> dict:
     """Return the version info dict from version.json, or {} if unavailable."""
     try:
-        with open(_VERSION_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(_read_version_json())
     except (OSError, ValueError):
         return {}
     info = data.get(APP_KEY)

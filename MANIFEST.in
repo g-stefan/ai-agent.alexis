@@ -1,20 +1,17 @@
-# Non-package data shipped with the source distribution.
-# The agent loads these relative to its own location at runtime.
-include version.json
-include requirements.txt
+# Source-distribution contents. Runtime data the agent loads via
+# importlib.resources lives inside the package (src/alexis/...) and is also
+# declared as package-data in pyproject.toml so it ships in the wheel.
 include README.md
 include LICENSE*
+include requirements.txt
 include config.jsonc.example
+include pyproject.toml
 
-# Bundled MCP server scripts (mcp/ is not an importable package on purpose,
-# so its files must be listed explicitly).
-recursive-include mcp *.py
-
-# Bundled agent skills / system prompt.
-recursive-include .agents *
+# Package sources + bundled data (mcp server scripts, web UI, version file).
+recursive-include src/alexis *.py *.json *.html *.md SYSTEM.md AGENTS.md
 
 # Extended documentation.
-recursive-include docs *.md
+recursive-include docs *.md *.jpg
 
 # Keep build noise out of the sdist.
 global-exclude __pycache__ *.py[cod]

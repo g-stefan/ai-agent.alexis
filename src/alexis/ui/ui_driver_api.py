@@ -7,12 +7,19 @@ import base64
 import json
 import os
 import sys
+import importlib.resources
 from typing import Callable, Dict, Any, List
 
 from .ui_driver import UIDriver
 
-# Web client served at the root URL (like llama.cpp's server UI).
-WEB_CLIENT_PATH = os.path.join(os.path.dirname(__file__), "ui_driver_api_web.html")
+# Web client served at the root URL (like llama.cpp's server UI). Resolved via
+# importlib.resources so it ships in the wheel and is found from any install.
+try:
+    WEB_CLIENT_PATH = os.fspath(
+        importlib.resources.files(__package__).joinpath("ui_driver_api_web.html")
+    )
+except Exception:
+    WEB_CLIENT_PATH = os.path.join(os.path.dirname(__file__), "ui_driver_api_web.html")
 # Placeholder inside the HTML that is replaced with the live server URL so the
 # client knows where to connect and can auto-connect on load.
 SERVER_URL_PLACEHOLDER = "__SERVER_URL__"
@@ -264,7 +271,7 @@ class APIUIDriver(UIDriver):
         async def api_version(request):
             """GET /version - Report the app name and version for the web client."""
             try:
-                import alexis_version
+                from .. import version as alexis_version
                 return web.json_response({
                     "name": alexis_version.APP_NAME,
                     "version": alexis_version.get_version(),

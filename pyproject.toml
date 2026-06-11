@@ -35,19 +35,29 @@ all = [
     "textual>=0.30.0",
 ]
 
-# The `alexis` terminal command -> alexis.py:main()
+# The `alexis` terminal command -> alexis/cli.py:main()
 [project.scripts]
-alexis = "alexis:main"
+alexis = "alexis.cli:main"
 
 [tool.setuptools]
-# Flat layout: three top-level modules plus the ui/ and model/ packages.
-py-modules = ["alexis", "alexis_version", "alexis_config"]
-packages = ["ui", "model"]
-# Ship the non-package data files listed in MANIFEST.in (version.json, the
-# bundled mcp/ server scripts, the .agents/ skills bundle, docs/). Required so a
-# source build / sdist carries everything the agent loads relative to itself.
+# src/ layout: a single import package `alexis` containing all modules and the
+# bundled data the agent loads at runtime via importlib.resources.
 include-package-data = true
 
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["alexis*"]
+
+[tool.setuptools.package-data]
+# Data shipped *inside* the wheel (not just the sdist), located at runtime via
+# importlib.resources. Without these, the agent's bundled MCP servers, web UI,
+# and version file would be missing from a `pip install`/wheel (only `-e .`
+# would have worked, since that points back at the source tree).
+"alexis" = ["data/*.json"]
+"alexis.mcp" = ["*.py"]
+"alexis.ui" = ["*.html"]
+
 [tool.setuptools.dynamic]
-# Single source of truth: version is read from version.json via alexis_version.
-version = { attr = "alexis_version.__version__" }
+# Single source of truth: version is read from data/version.json via
+# alexis.version. importlib.resources resolves it at build time too.
+version = { attr = "alexis.version.__version__" }
