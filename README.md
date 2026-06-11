@@ -102,7 +102,8 @@ alexis "prompt" \
 | `input` / `-p, --prompt`     | Prompt text, or path to a text file containing the prompt             |
 | `--url`                      | LLM server URL (default `http://127.0.0.1:8080/v1/chat/completions`)  |
 | `--llm-driver`               | Backend provider: `llama` (default), `gemini`                         |
-| `--ui-driver`                | Interface: `simple` (default), `interactive`, `textual`, `api`        |
+| `--ui-driver`                | Interface: `textual` (default), `interactive`, `api`, `simple` (auto for one-shot `--prompt`) |
+| `--cmd`                      | Clean/CI mode: reset all on-by-default capabilities to off, default UI to `simple`, ignore the `[agent]` config section |
 | `--model`                    | Model name (e.g. `gemini-2.5-flash`)                                  |
 | `--api-key`                  | API key (or `API_KEY` env var)                                        |
 | `--system`                   | Path to a Markdown system-prompt file                                 |
@@ -171,23 +172,46 @@ are allowed) defines named providers and which one is the default. Copy
       "driver": "llama",
       "url": "http://127.0.0.1:8080/v1/chat/completions",
       "api-key": null,
-      "model": "default"
+      "model": "default",
+      "context-limit": 8192
     },
     "gemini": {
       "driver": "gemini",
       "url": "https://your-gemini-gateway/v1/chat/completions",
       "api-key": "YOUR_API_KEY_HERE",
-      "model": "gemini-2.5-flash"
+      "model": "gemini-2.5-flash",
+      "context-limit": 1048576
     }
+  },
+  "agent": {
+    "internal-mcp-subagent": false
   }
 }
 ```
 
 - The agent uses `default-provider` automatically; pass `--provider <name>` to
   pick a different one for a single run.
+- **`context-limit`** is per-provider (different models have different windows)
+  and feeds the context-usage `%` display; `--context-limit` overrides it.
+- **Capabilities default ON.** A bare `alexis` run already uses `SYSTEM.md` /
+  `AGENTS.md` / skills, the bundled `workspace` + `skills` MCP servers, the
+  internal subagent, and the `textual` TUI — no flags or config needed. Turn one
+  off per-run with `--no-agent-use-skills` (etc.), or persistently in the
+  **`agent`** section. Keys mirror the flag names without the `--agent-` prefix
+  (`use-system-md`, `use-agents-md`, `use-skills`, `use-mcp-<name>`,
+  `internal-mcp-subagent`, plus `ui-driver`). `ui-driver` applies only when
+  `--ui-driver` is omitted.
+- **`--cmd` for scripts / CI.** Resets all those on-by-default capabilities to
+  **off**, defaults the UI to the non-interactive `simple` driver, and ignores
+  the `[agent]` config section, so the run behaves the same on any machine
+  regardless of local `config.jsonc`. Provider connection settings still apply.
+  Opt back into a capability with its explicit flag — `alexis --cmd -p "..."
+  --agent-use-skills` — which always wins.
 - **Precedence** (highest first): explicit CLI flags (`--llm-driver`, `--url`,
-  `--api-key`, `--model`) → the selected provider → built-in defaults
-  (`llama`, `http://127.0.0.1:8080/...`, the `API_KEY` env var).
+  `--api-key`, `--model`, `--context-limit`, `--ui-driver`, `--agent-use-*` /
+  `--no-agent-use-*`) → the selected provider / `agent` section → built-in
+  defaults (capabilities on; `llama`, `http://127.0.0.1:8080/...`, the `API_KEY`
+  env var).
 
 ```bash
 alexis "hello"                    # uses default-provider
@@ -197,13 +221,14 @@ alexis "hello" --provider gemini --model gemini-2.5-pro   # provider + override
 
 ## Bundled MCP & skills
 
-Alexis ships bundled MCP servers under `mcp/` and an Agent Skills bundle under `.agents/`. Enable them with the auto-generated `--agent-use-mcp-<name>` flags and `--agent-use-skills`:
+Alexis ships bundled MCP servers under `mcp/` and an Agent Skills bundle under `.agents/`. These are **enabled by default** (along with `SYSTEM.md` / `AGENTS.md` and the internal subagent), so a bare `alexis` run already has them. Turn one off when you don't want it:
 
 ```bash
-alexis --interactive --agent-use-skills --agent-use-mcp-workspace
+alexis --no-agent-use-mcp-workspace      # drop the workspace MCP server
+alexis --no-agent-internal-mcp-subagent  # drop the recursive subagent tool
 ```
 
-It can also run **as** an MCP server (`--agent-as-mcp-server`) or spawn itself recursively as an internal subagent (`--agent-internal-mcp-subagent`). See `alexis --help` and the `docs/` folder for details.
+The auto-generated `--agent-use-mcp-<name>` flags (and their `--no-` forms) are still there for explicit control. Alexis can also run **as** an MCP server (`--agent-as-mcp-server`). See `alexis --help` and the `docs/` folder for details.
 
 ---
 

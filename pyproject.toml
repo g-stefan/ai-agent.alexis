@@ -40,8 +40,8 @@ all = [
 alexis = "alexis:main"
 
 [tool.setuptools]
-# Flat layout: two top-level modules plus the ui/ and model/ packages.
-py-modules = ["alexis", "alexis_version"]
+# Flat layout: three top-level modules plus the ui/ and model/ packages.
+py-modules = ["alexis", "alexis_version", "alexis_config"]
 packages = ["ui", "model"]
 # Ship the non-package data files listed in MANIFEST.in (version.json, the
 # bundled mcp/ server scripts, the .agents/ skills bundle, docs/). Required so a

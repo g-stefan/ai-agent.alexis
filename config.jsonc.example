@@ -23,7 +23,10 @@
       "driver": "llama",
       "url": "http://127.0.0.1:8080/v1/chat/completions",
       "api-key": null,
-      "model": "default"
+      "model": "default",
+      // Context window for the usage % display (== --context-limit). Per
+      // provider, since different providers/models have different limits.
+      "context-limit": 8192
     },
 
     // Gemini-compatible gateway.
@@ -31,7 +34,31 @@
       "driver": "gemini",
       "url": "https://your-gemini-gateway/v1/chat/completions",
       "api-key": "YOUR_API_KEY_HERE",
-      "model": "gemini-2.5-flash"
+      "model": "gemini-2.5-flash",
+      "context-limit": 1048576
     }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Agent capabilities + UI driver. These are ALL ON BY DEFAULT now, so a bare
+  // `alexis` run already uses SYSTEM.md / AGENTS.md / skills, the bundled
+  // workspace + skills MCP servers, the internal subagent, and the textual TUI.
+  // This section only exists to OVERRIDE those defaults. Keys mirror the flag
+  // names without the --agent- prefix:
+  //   "use-system-md"          == --agent-use-system-md
+  //   "use-agents-md"          == --agent-use-agents-md
+  //   "use-skills"             == --agent-use-skills
+  //   "use-mcp-<name>"         == --agent-use-mcp-<name>  (one per bundled server)
+  //   "internal-mcp-subagent"  == --agent-internal-mcp-subagent
+  //   "ui-driver"              == --ui-driver <name>
+  // Precedence: an explicit CLI flag (--agent-use-X / --no-agent-use-X) wins
+  // over this section, which wins over the built-in default. "ui-driver" applies
+  // only when --ui-driver is omitted. Delete or leave out this whole section to
+  // keep the (all-on) defaults; the example below turns the internal subagent
+  // off and keeps everything else at its default. Running with --cmd ignores
+  // this whole section (clean mode for scripts / CI).
+  // ─────────────────────────────────────────────────────────────────────────
+  "agent": {
+    "internal-mcp-subagent": false
   }
 }

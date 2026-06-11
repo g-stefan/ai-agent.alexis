@@ -1069,9 +1069,10 @@ async def async_main():
     parser.add_argument("-p", "--prompt", type=str, default=None, help="Pass a direct string on the command line to use as the prompt.")
     parser.add_argument("--session", type=str, help="Path to a JSON file to save/load the chat history for continuous conversations.")
     parser.add_argument("--system", type=str, help="Path to a markdown text file containing the system message.")
-    parser.add_argument("--agent-use-system-md", action="store_true", help="If present, prepend .agents/SYSTEM.md (from the current folder) to the system prompt when it exists. The user-global ~/.alexis/SYSTEM.md (override home via AI_AGENT_ALEXIS_HOME) is always included when present, regardless of this flag.")
-    parser.add_argument("--agent-use-agents-md", action="store_true", help="If present, append AGENTS.md (from the current folder) to the system prompt when it exists.")
-    parser.add_argument("--agent-use-skills", action="store_true", help="If present, discover skills (Agent Skills protocol) and add their names/descriptions to the system prompt. Searches the project's .agents/skills/ first, then the user-global ~/.alexis/skills/ (override home via AI_AGENT_ALEXIS_HOME).")
+    parser.add_argument("--cmd", action="store_true", help="Clean/command mode for scripts and CI: reset all the on-by-default capabilities (--agent-use-system-md/-agents-md/-skills, --agent-use-mcp-<name>, --agent-internal-mcp-subagent) to OFF and default --ui-driver to 'simple', and ignore the [agent] section of config.jsonc. Provider connection settings still apply; opt back into any capability with its explicit --agent-use-* flag (which always wins).")
+    parser.add_argument("--agent-use-system-md", action=argparse.BooleanOptionalAction, default=None, help="Prepend .agents/SYSTEM.md (from the current folder) to the system prompt when it exists. The user-global ~/.alexis/SYSTEM.md (override home via AI_AGENT_ALEXIS_HOME) is always included when present, regardless of this flag. (default: on; use --no-agent-use-system-md to disable)")
+    parser.add_argument("--agent-use-agents-md", action=argparse.BooleanOptionalAction, default=None, help="Append AGENTS.md (from the current folder) to the system prompt when it exists. (default: on; use --no-agent-use-agents-md to disable)")
+    parser.add_argument("--agent-use-skills", action=argparse.BooleanOptionalAction, default=None, help="Discover skills (Agent Skills protocol) and add their names/descriptions to the system prompt. Searches the project's .agents/skills/ first, then the user-global ~/.alexis/skills/ (override home via AI_AGENT_ALEXIS_HOME). (default: on; use --no-agent-use-skills to disable)")
     parser.add_argument("--images", type=str, nargs='+', help="Path(s) to image files to include in the prompt.")
     parser.add_argument("--assets", type=str, nargs='+', help="Path(s) to folder(s) containing image (png, jpg, jpeg) files to automatically include in the prompt.")
     parser.add_argument("--mcp", type=str, action=MCPAppendAction, nargs='+', help="Commands to start MCP servers (e.g., 'npx -y ...') or HTTP URLs ('http://.../sse' for SSE, 'http://.../mcp' for Streamable HTTP). Can be specified multiple times.")
@@ -1082,15 +1083,15 @@ async def async_main():
     # that server (stdio) and forwards it to subagents. Drop a new
     # mcp-server-<name>.py into mcp/ and its flag appears here automatically.
     for _mcp_name in discover_bundled_mcp_servers():
-        parser.add_argument(f"--agent-use-mcp-{_mcp_name}", action="store_true",
-                            help=bundled_mcp_help(_mcp_name))
-    parser.add_argument("--agent-internal-mcp-subagent", action="store_true", help="Attach this agent itself as a bundled stdio Subagent MCP server (like --agent-use-mcp-skills) — equivalent to '--mcp \"python <THIS_SCRIPT> --agent-as-mcp-server --agent-mcp-transport stdio <forwarded config>\"'. The spawned subagent inherits the main agent's LLM driver/url/model/generation settings, the --agent-use-* capability flags, and the full environment, and exposes a 'subagent(prompt)' tool that runs a full conversation and returns only the final answer.")
+        parser.add_argument(f"--agent-use-mcp-{_mcp_name}", action=argparse.BooleanOptionalAction,
+                            default=None, help=bundled_mcp_help(_mcp_name) + " (default: on; use --no-... to disable)")
+    parser.add_argument("--agent-internal-mcp-subagent", action=argparse.BooleanOptionalAction, default=None, help="Attach this agent itself as a bundled stdio Subagent MCP server (like --agent-use-mcp-skills) — equivalent to '--mcp \"python <THIS_SCRIPT> --agent-as-mcp-server --agent-mcp-transport stdio <forwarded config>\"'. The spawned subagent inherits the main agent's LLM driver/url/model/generation settings, the --agent-use-* capability flags, and the full environment, and exposes a 'subagent(prompt)' tool that runs a full conversation and returns only the final answer. (default: on; use --no-agent-internal-mcp-subagent to disable)")
     parser.add_argument("--mcp-subagent-use-processing-done", action="store_true", help="With --agent-internal-mcp-subagent, forward --subagent-mcp-main to the spawned subagent so it registers the in-process 'Main' server's processing_done(result) tool and returns that result as its output (instead of its final assistant text).")
     parser.add_argument("--agent-subagent-tree", action="store_true", help="With --agent-internal-mcp-subagent, also forward --agent-internal-mcp-subagent (and --mcp-subagent-use-processing-done, if set) to each spawned subagent, so subagents can recursively spawn their own subagents. Depth is bounded by --agent-subagent-level.")
     parser.add_argument("--agent-subagent-level", type=int, default=3, help="Maximum subagent tree depth below this agent (default: 3, i.e. main -> subagent[1] -> subagent[2] -> subagent[3]). Decremented for each spawned subagent; at 0 no further subagent is registered. Only meaningful with --agent-internal-mcp-subagent (and recursion needs --agent-subagent-tree).")
     parser.add_argument("--provider", type=str, default=None, help="Name of a provider defined in ~/.alexis/config.jsonc to use for the LLM connection (driver/url/api-key/model). Defaults to that file's 'default-provider'. Individual --llm-driver/--url/--api-key/--model flags override the provider's values.")
     parser.add_argument("--llm-driver", type=str, default=None, choices=get_llm_drivers(), help=f"LLM driver to use (default: config provider, else 'llama'). Available: {', '.join(get_llm_drivers())}")
-    parser.add_argument("--ui-driver", type=str, default="simple", choices=get_ui_driver_names(), help=f"UI driver/mode to use (default: simple). Available: {', '.join(get_ui_driver_names())}")
+    parser.add_argument("--ui-driver", type=str, default=None, choices=get_ui_driver_names(), help=f"UI driver/mode to use. Default: the textual TUI for an interactive launch, or 'simple' for a one-shot --prompt/--input. Available: {', '.join(get_ui_driver_names())}")
     parser.add_argument("--url", type=str, default=None, help="URL of the server (default: config provider, else http://127.0.0.1:8080/v1/chat/completions)")
     parser.add_argument("--temp", type=float, default=0.7, help="Generation temperature (default: 0.7)")
     parser.add_argument("--max-tokens", type=int, default=-1, help="Maximum tokens to predict. -1 means infinity (default: -1)")
@@ -1156,6 +1157,12 @@ async def async_main():
             args.api_key = _provider["api_key"]
         if args.model is None and _provider.get("model"):
             args.model = _provider["model"]
+        if args.context_limit is None and _provider.get("context_limit") is not None:
+            try:
+                args.context_limit = int(_provider["context_limit"])
+            except (TypeError, ValueError):
+                print(f"\033[91m[!] Provider '{_provider_name}' has invalid context-limit {_provider['context_limit']!r} (expected an integer).\033[0m", file=sys.stderr)
+                sys.exit(1)
         print(f"\033[94m[*] Provider '{_provider_name}' (from {alexis_config.config_path(alexis_home())})\033[0m", file=sys.stderr)
     # Fill any still-unset connection settings from the built-in defaults.
     if args.llm_driver is None:
@@ -1167,17 +1174,93 @@ async def async_main():
     if args.api_key is None:
         args.api_key = os.environ.get("API_KEY")
 
+    # Resolve the agent capability flags + UI driver, in precedence order:
+    #   explicit CLI flag  >  config [agent] section  >  built-in default.
+    # The capabilities below default ON, so a bare `alexis` run gets SYSTEM.md /
+    # AGENTS.md / skills, the bundled workspace+skills MCP servers, and the
+    # internal subagent without any flags or config. The flags use
+    # BooleanOptionalAction with a None default, so None means "not given on the
+    # CLI" (defer to config / built-in default) while True/False is an explicit
+    # --agent-use-X / --no-agent-use-X and always wins. `ui-driver` feeds the
+    # auto-resolution below only when --ui-driver was omitted. Done after the
+    # connection defaults so it lands before the bundled-MCP / subagent / UI
+    # wiring that reads these values.
+    _DEFAULT_ON_DESTS = {
+        "agent_use_system_md", "agent_use_agents_md", "agent_use_skills",
+        "agent_internal_mcp_subagent",
+    }
+    _DEFAULT_ON_DESTS |= {"agent_use_mcp_" + n.replace("-", "_")
+                          for n in discover_bundled_mcp_servers()}
+    try:
+        _agent_defaults = alexis_config.resolve_agent_defaults(_config)
+    except ValueError as e:
+        print(f"\033[91m[!] {e}\033[0m", file=sys.stderr)
+        sys.exit(1)
+    _config_agent = {}      # {dest: bool} parsed from the config [agent] section
+    _config_ui_driver = None
+    for _key, _val in _agent_defaults.items():
+        if _key in ("ui-driver", "ui_driver"):
+            if _val:
+                if _val not in get_ui_driver_names():
+                    print(f"\033[91m[!] config agent.ui-driver '{_val}' is not available. Available: {', '.join(get_ui_driver_names())}\033[0m", file=sys.stderr)
+                    sys.exit(1)
+                _config_ui_driver = _val
+            continue
+        _dest = "agent_" + _key.replace("-", "_")
+        if not hasattr(args, _dest):
+            print(f"\033[93m[!] Ignoring unknown config agent.{_key} (no matching option).\033[0m", file=sys.stderr)
+            continue
+        if not isinstance(_val, bool):
+            print(f"\033[91m[!] config agent.{_key} must be true or false, got {_val!r}.\033[0m", file=sys.stderr)
+            sys.exit(1)
+        _config_agent[_dest] = _val
+    # --cmd is a clean slate for scripts/CI: the on-by-default capabilities reset
+    # to OFF and the [agent] config section is ignored, so behaviour doesn't
+    # depend on whatever config.jsonc happens to be on the machine. An explicit
+    # --agent-use-X always wins, so you opt back in per capability.
+    _cmd_mode = getattr(args, "cmd", False)
+    for _dest in _DEFAULT_ON_DESTS:
+        if getattr(args, _dest, None) is None:                  # not set on the CLI
+            if _cmd_mode:
+                setattr(args, _dest, False)
+            else:
+                setattr(args, _dest, _config_agent.get(_dest, True))
+    # Any other agent_* option named only in config (legacy store_true flags such
+    # as --agent-subagent-tree): config can enable it (CLI still wins when set);
+    # skipped entirely in --cmd mode.
+    if not _cmd_mode:
+        for _dest, _val in _config_agent.items():
+            if _dest not in _DEFAULT_ON_DESTS and _val and not getattr(args, _dest, False):
+                setattr(args, _dest, True)
+        # UI driver from config applies only when --ui-driver was omitted.
+        if args.ui_driver is None and _config_ui_driver:
+            args.ui_driver = _config_ui_driver
+
     # Snapshot the user's explicit --mcp servers BEFORE the --agent-use-mcp-*
     # blocks append their own (workspace/skills) entries. These are forwarded
     # verbatim to internal subagents so a subagent gets the same MCP tools as the
     # parent (the bundled workspace/skills servers are forwarded as flags instead).
     _user_mcp_configs = [dict(c) for c in (getattr(args, 'mcp_configs', None) or [])]
 
-    # Auto-detect UI driver from legacy arguments if not explicitly set
-    if args.ui_driver == "simple":
+    # Resolve the UI driver when one wasn't explicitly chosen (--ui-driver omitted).
+    # Legacy flags pick their mode; a one-shot --prompt/--input/--images/--assets
+    # stays on the scriptable (non-TUI) simple driver so output can be piped;
+    # otherwise default to the textual TUI, falling back to the line-based
+    # interactive driver if textual isn't installed (`pip install alexis[tui]`).
+    if args.ui_driver is None:
         if args.api_port:
             args.ui_driver = "api"
         elif args.interactive:
+            args.ui_driver = "interactive"
+        elif _cmd_mode:
+            # --cmd: non-interactive by default — never auto-launch the TUI.
+            args.ui_driver = "simple"
+        elif any([args.input, args.prompt, args.images, args.assets]) and not args.session:
+            args.ui_driver = "simple"
+        elif "textual" in get_ui_driver_names():
+            args.ui_driver = "textual"
+        else:
+            print("\033[93m[!] Textual TUI not installed (pip install alexis[tui]); using the interactive driver.\033[0m", file=sys.stderr)
             args.ui_driver = "interactive"
 
     # In API mode, fall back to the default port when one wasn't given explicitly
@@ -1187,13 +1270,13 @@ async def async_main():
         args.api_port = 48010
 
     # Bundled MCP servers: for each enabled --agent-use-mcp-<name>, attach
-    # mcp/mcp-server-<name>.py (stdio), apply its env defaults, and remember the
-    # name so it can be forwarded to subagents. This data-driven loop replaces the
-    # former per-server (workspace/skills) blocks; special wiring lives in
+    # mcp/mcp-server-<name>.py (stdio) and apply its env defaults. The subagent
+    # forwarding below re-reads each server's resolved on/off state from args.
+    # This data-driven loop replaces the former per-server (workspace/skills)
+    # blocks; special wiring lives in
     # SPECIAL_MCP_SERVERS, anything else gets a generic env-base of <NAME>.
     # The interpreter and script path are quoted so the command round-trips
     # through shlex.split at launch time (handles spaces/backslashes on Windows).
-    _enabled_bundled_mcp: List[str] = []
     for _name in discover_bundled_mcp_servers():
         if not getattr(args, "agent_use_mcp_" + _name.replace("-", "_"), False):
             continue
@@ -1214,7 +1297,6 @@ async def async_main():
             _defaults = _defaults()
         for _k, _v in _defaults.items():
             os.environ.setdefault(_k, _v)
-        _enabled_bundled_mcp.append(_name)
         _extra = f" (env-base {_env_base})" if _env_base else ""
         print(f"\033[94m[*] MCP '{_name}' enabled: {_script}{_extra}\033[0m", file=sys.stderr)
 
@@ -1258,14 +1340,17 @@ async def async_main():
             parts += ["--timeout", str(args.timeout)]
         # Capability flags: let the subagent assemble the same SYSTEM.md/AGENTS.md/
         # skills context and attach the same bundled MCP servers. SUBAGENTS.md is
-        # added automatically in subagent mode.
-        if getattr(args, 'agent_use_system_md', False): parts += ["--agent-use-system-md"]
-        if getattr(args, 'agent_use_agents_md', False): parts += ["--agent-use-agents-md"]
-        if getattr(args, 'agent_use_skills', False): parts += ["--agent-use-skills"]
-        # Forward every enabled bundled MCP server (--agent-use-mcp-<name>); the
-        # subagent re-discovers them from its own mcp/ and attaches the same set.
-        for _name in _enabled_bundled_mcp:
-            parts += [f"--agent-use-mcp-{_name}"]
+        # added automatically in subagent mode. These capabilities default ON in
+        # the child too, so we forward the resolved value explicitly (both
+        # --agent-use-X and --no-agent-use-X) to mirror the parent exactly.
+        parts += ["--agent-use-system-md" if args.agent_use_system_md else "--no-agent-use-system-md"]
+        parts += ["--agent-use-agents-md" if args.agent_use_agents_md else "--no-agent-use-agents-md"]
+        parts += ["--agent-use-skills" if args.agent_use_skills else "--no-agent-use-skills"]
+        # Forward each bundled MCP server's resolved on/off state; the subagent
+        # re-discovers them from its own mcp/ and attaches the same set.
+        for _name in discover_bundled_mcp_servers():
+            _on = getattr(args, "agent_use_mcp_" + _name.replace("-", "_"), False)
+            parts += [f"--agent-use-mcp-{_name}" if _on else f"--no-agent-use-mcp-{_name}"]
         # Forward the user's explicit --mcp servers verbatim (endpoint + optional
         # api-key / env-base) so the subagent gets the same external tools.
         for cfg in _user_mcp_configs:
@@ -1289,6 +1374,11 @@ async def async_main():
         if recursion_on:
             parts += ["--agent-internal-mcp-subagent", "--agent-subagent-tree",
                       "--agent-subagent-level", str(child_level)]
+        else:
+            # The child defaults --agent-internal-mcp-subagent ON now; disable it
+            # explicitly outside tree mode so the subagent does not recursively
+            # spawn its own subagent at startup (which would loop down to level 0).
+            parts += ["--no-agent-internal-mcp-subagent"]
             if done_on:
                 parts += ["--mcp-subagent-use-processing-done"]
         endpoint = " ".join(shlex.quote(p) for p in parts)

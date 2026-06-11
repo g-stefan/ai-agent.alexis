@@ -19,10 +19,15 @@ except ImportError:
 UI_DRIVERS = {
     "api": APIUIDriver,
     "interactive": InteractiveUIDriver,
-    "textual": TextualInteractiveUIDriver,
     "simple": SimpleUIDriver,
     "ui": UIDriver,
 }
+
+# The textual TUI is an optional extra (`pip install alexis[tui]`); only register
+# it when its dependencies imported successfully, so the factory still works in a
+# base install instead of failing with a NameError on the missing symbol.
+if HAS_TEXTUAL:
+    UI_DRIVERS["textual"] = TextualInteractiveUIDriver
 
 
 def create_ui_driver(driver_type: str) -> UIDriver:

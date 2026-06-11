@@ -6,17 +6,29 @@
 
 The config file is JSONC (JSON with ``//`` and ``/* */`` comments and tolerant
 of trailing commas). It defines named LLM *providers* and which one is the
-default:
+default, an optional per-provider ``context-limit``, and an optional ``agent``
+section holding default capability flags / UI driver:
 
     {
       "default-provider": "local-llama",
       "providers": {
-        "local-llama": { "driver": "llama",  "url": "...", "api-key": null,  "model": "default" },
-        "gemini":      { "driver": "gemini", "url": "...", "api-key": "...", "model": "gemini-2.5-flash" }
+        "local-llama": { "driver": "llama",  "url": "...", "api-key": null,  "model": "default", "context-limit": 8192 },
+        "gemini":      { "driver": "gemini", "url": "...", "api-key": "...", "model": "gemini-2.5-flash", "context-limit": 1048576 }
+      },
+      "agent": {
+        "use-system-md": true,
+        "use-agents-md": true,
+        "use-skills": true,
+        "use-mcp-workspace": true,
+        "use-mcp-skills": true,
+        "internal-mcp-subagent": true,
+        "ui-driver": "textual"
       }
     }
 
-Command-line flags always override the values resolved from here.
+Command-line flags always override the values resolved from here (the boolean
+``agent`` flags only enable capabilities, so the effective value is the union of
+the flag and the config).
 """
 
 import json
@@ -84,7 +96,9 @@ def load_config(home_dir: str) -> Dict[str, Any]:
     if not os.path.isfile(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig tolerates a leading BOM, which Windows editors (Notepad)
+        # often add; plain utf-8 would choke on it.
+        with open(path, "r", encoding="utf-8-sig") as f:
             raw = f.read()
     except OSError as e:
         raise ValueError(f"Could not read {path}: {e}") from e
@@ -126,5 +140,28 @@ def resolve_provider(config: Dict[str, Any],
         "url": _get(raw, "url"),
         "api_key": _get(raw, "api-key", "api_key", "apiKey"),
         "model": _get(raw, "model"),
+        # Per-provider context window — different providers/models have different
+        # limits, so this lives on the provider rather than in [agent]. Used only
+        # to show the context-usage percentage; --context-limit overrides it.
+        "context_limit": _get(raw, "context-limit", "context_limit", "contextLimit"),
     }
     return name, params
+
+
+def resolve_agent_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the ``[agent]`` section: persistent defaults for the agent
+    capability flags and the UI driver, the config equivalent of passing
+    ``--agent-use-*`` / ``--agent-internal-mcp-subagent`` / ``--ui-driver`` on the
+    command line. Keys mirror the flag names without the ``--agent-`` prefix, e.g.
+    ``use-skills``, ``use-mcp-workspace``, ``internal-mcp-subagent``, plus
+    ``ui-driver``. Returns ``{}`` when the section is absent.
+
+    Raises ValueError if present but not a JSON object."""
+    agent = config.get("agent")
+    if agent is None:
+        agent = config.get("agent-defaults") or config.get("agent_defaults")
+    if agent is None:
+        return {}
+    if not isinstance(agent, dict):
+        raise ValueError("config 'agent' section must be an object")
+    return agent
