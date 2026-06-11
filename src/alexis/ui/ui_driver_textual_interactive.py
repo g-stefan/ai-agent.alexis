@@ -1053,6 +1053,7 @@ if TEXTUAL_AVAILABLE:
             "  Ctrl+J         New line in the input box\n"
             "  Shift+Enter    New line (terminals with enhanced keys)\n"
             "  Ctrl+L         Clear the conversation\n"
+            "  Ctrl+B         Show/hide the stats sidebar\n"
             "  Ctrl+P         Command palette\n"
             "  Ctrl+C         Quit\n\n"
             "[bold]Slash commands[/bold] (type in the input box)\n"
@@ -1135,6 +1136,11 @@ if TEXTUAL_AVAILABLE:
 
     class ChatApp(App):
         """Main Textual application for chat."""
+
+        # Below this terminal width the stats sidebar is hidden so the whole
+        # row goes to the conversation — a narrow window is almost always the
+        # user reading/typing chat, not watching token counters.
+        STATS_MIN_WIDTH = 80
 
         # Panels are separated by background colour rather than borders.
         CSS = """
@@ -1511,6 +1517,7 @@ if TEXTUAL_AVAILABLE:
         BINDINGS = [
             Binding("ctrl+c", "quit", "Quit", show=False),
             Binding("ctrl+l", "clear_history", "Clear", show=False),
+            Binding("ctrl+b", "toggle_stats", "Toggle sidebar", show=False),
         ]
 
         def __init__(self, context_limit=None, run_callback=None, messages=None,
@@ -1534,6 +1541,9 @@ if TEXTUAL_AVAILABLE:
             # Backend hook to start a fresh session (clears history, rotates the
             # session file). Optional — falls back to a local clear if absent.
             self.reset_session = reset_session
+            # Manual sidebar override: None = follow terminal width, True/False =
+            # user forced it shown/hidden via Ctrl+B (sticks past resizes).
+            self._stats_override: Optional[bool] = None
             # The worker running the current turn, so /stop can cancel it.
             self._active_worker = None
             # Set when the user presses Stop; plumbed to the backend so it can
@@ -1564,6 +1574,39 @@ if TEXTUAL_AVAILABLE:
                 "context_limit": self.context_limit,
                 "thinking_enabled": self.thinking_enabled,
             })
+            # Match the sidebar to the current terminal width right away.
+            self._update_stats_visibility(self.size.width)
+
+        def on_resize(self, event: events.Resize) -> None:
+            """Show/hide the stats sidebar as the terminal is resized."""
+            self._update_stats_visibility(event.size.width)
+
+        def _update_stats_visibility(self, width: int) -> None:
+            """Hide the stats sidebar on a narrow terminal so the conversation
+            gets the full width; show it again once there is room. A manual
+            Ctrl+B override, if set, wins over the width-based default."""
+            try:
+                stats = self.query_one("#stats")
+            except Exception:
+                return
+            if self._stats_override is not None:
+                stats.display = self._stats_override
+            else:
+                stats.display = width >= self.STATS_MIN_WIDTH
+
+        def action_toggle_stats(self) -> None:
+            """Toggle the stats sidebar (Ctrl+B). Sets a manual override that
+            persists across resizes until toggled back."""
+            try:
+                stats = self.query_one("#stats")
+            except Exception:
+                return
+            self._stats_override = not stats.display
+            stats.display = self._stats_override
+            self.notify(
+                "Sidebar shown" if self._stats_override else "Sidebar hidden",
+                timeout=1.5,
+            )
 
         # ── Slash commands ───────────────────────────────────────
         def _build_slash_commands(self) -> None:

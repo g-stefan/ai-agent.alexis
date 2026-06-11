@@ -1433,7 +1433,7 @@ async def async_main():
         args.mcp_configs.append({"endpoint": endpoint, "api_key": None, "env_base": "SUBAGENT"})
         done_note = " (with processing_done)" if done_on else ""
         tree_note = f", tree -> children get level {child_level}" if recursion_on else ""
-        print(f"\033[94m[*] Internal Subagent MCP enabled{done_note} (level {_subagent_level}{tree_note}): {self_script}\033[0m", file=sys.stderr)
+        print(f"\033[94m[*] Internal Subagent MCP enabled{done_note} (level {_subagent_level}{tree_note}): python -m {__package__}\033[0m", file=sys.stderr)
     elif getattr(args, 'agent_internal_mcp_subagent', False):
         # Flag was set but the depth budget is exhausted — stop the tree here.
         print("\033[93m[!] Subagent tree level is 0; not registering a further subagent.\033[0m", file=sys.stderr)
@@ -2041,6 +2041,13 @@ def main():
     except SystemExit as e:
         sys.exit(e.code)
     except BaseException as e:
+        # Surface the failure instead of exiting silently. A full traceback is
+        # printed when ALEXIS_DEBUG is set; otherwise a one-line error.
+        import traceback
+        if os.environ.get("ALEXIS_DEBUG"):
+            traceback.print_exc()
+        else:
+            print(f"\033[91m[!] Fatal: {type(e).__name__}: {e}\033[0m", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
