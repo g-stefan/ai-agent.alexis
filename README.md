@@ -242,7 +242,6 @@ pyproject.toml            # Packaging / console-script definition
 ui/                       # UI drivers (ui_driver_*.py) + factory
 model/                    # LLM drivers (llm_driver_*.py) + factory
 mcp/                      # Bundled MCP server scripts
-.agents/                  # Agent skills bundle
 docs/                     # Extended documentation
 ```
 
@@ -263,4 +262,6 @@ More detailed guides live in [`docs/`](docs/):
 
 ## License
 
-Apache-2.0 © Grigore Stefan
+Copyright (c) 2026 Grigore Stefan <g_stefan@yahoo.com>
+Licensed under the [Apache-2.0](LICENSE) license.
+
