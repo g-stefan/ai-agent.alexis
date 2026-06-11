@@ -18,7 +18,7 @@ The architecture is built around two independent plugin systems:
 
 ## Installation
 
-The project installs as an **editable** package, which exposes an `alexis` command in your terminal. Editable install is the supported method: the agent re-spawns itself as a subprocess and loads bundled MCP servers (`mcp/`) and skills (`.agents/`) relative to its own location, so the files must stay in place.
+The project installs as an **editable** package, which exposes an `alexis` command in your terminal. Editable install is the supported method: the agent re-spawns itself as a subprocess and loads bundled MCP servers (`mcp/`) and skills (`skills/`) relative to its own location, so the files must stay in place.
 
 ```bash
 # from the project root
@@ -221,7 +221,7 @@ alexis "hello" --provider gemini --model gemini-2.5-pro   # provider + override
 
 ## Bundled MCP & skills
 
-Alexis ships bundled MCP servers under `mcp/` and an Agent Skills bundle under `.agents/`. These are **enabled by default** (along with `SYSTEM.md` / `AGENTS.md` and the internal subagent), so a bare `alexis` run already has them. Turn one off when you don't want it:
+Alexis ships bundled MCP servers under `mcp/` and an Agent Skills bundle under `skills/`. These are **enabled by default** (along with `SYSTEM.md` / `AGENTS.md` and the internal subagent), so a bare `alexis` run already has them. Turn one off when you don't want it:
 
 ```bash
 alexis --no-agent-use-mcp-workspace      # drop the workspace MCP server
