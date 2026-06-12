@@ -34,11 +34,15 @@ pre_parser = argparse.ArgumentParser(add_help=False)
 pre_parser.add_argument("--env-base", type=str, default="")
 pre_parser.add_argument("--tool-prefix", type=str, default="todo_")
 pre_parser.add_argument("--mcp-name", type=str, default="Todo")
+pre_parser.add_argument("--session", type=str, default="")
+pre_parser.add_argument("--in-memory", dest="in_memory", action="store_true")
 pre_args, _ = pre_parser.parse_known_args()
 
 ENV_PREFIX = pre_args.env_base
 TOOL_PREFIX = pre_args.tool_prefix
 MCP_NAME = pre_args.mcp_name
+SESSION_ID = pre_args.session
+IN_MEMORY = pre_args.in_memory
 
 
 def get_env_var(name: str, default: Any = None) -> Any:
@@ -51,9 +55,35 @@ def get_env_var(name: str, default: Any = None) -> Any:
     return os.environ.get(env_key, default)
 
 
-# Project-bound database location. Defaults to .agents/repository/todo.sqlite in
-# the current folder; override with <PREFIX>_DB (e.g. MCP_TODO_DB).
-DB_PATH = get_env_var("DB", os.path.join(".agents", "repository", "todo.sqlite"))
+def _alexis_home() -> str:
+    """Per-user home dir: ``$AI_AGENT_ALEXIS_HOME`` or ``~/.alexis`` — mirrors
+    ``cli.alexis_home()`` so this standalone server resolves session paths to the
+    same place the agent does."""
+    env = os.environ.get("AI_AGENT_ALEXIS_HOME")
+    if env and env.strip():
+        return os.path.abspath(os.path.expanduser(env.strip()))
+    return os.path.join(os.path.expanduser("~"), ".alexis")
+
+
+def _resolve_db_path() -> str:
+    """Resolve the database path. Precedence:
+      1. an explicit <PREFIX>_DB env var (power-user override, e.g. MCP_TODO_DB)
+      2. ``--session <id>`` -> <alexis_home>/sessions/<id>.todo.sqlite (the
+         per-directory session store, keeping todo data out of the project folder)
+      3. legacy project-bound default ``.agents/repository/todo.sqlite``
+    """
+    explicit = get_env_var("DB")
+    if explicit:
+        return explicit
+    if SESSION_ID:
+        return os.path.join(_alexis_home(), "sessions", f"{SESSION_ID}.todo.sqlite")
+    return os.path.join(".agents", "repository", "todo.sqlite")
+
+
+# With --in-memory nothing is written to disk: the plan lives only for the life
+# of this process. Used by subagents, whose todo lists are throwaway scratch and
+# should never leave files behind.
+DB_PATH = ":memory:" if IN_MEMORY else _resolve_db_path()
 # Port for HTTP mode, defaulting to 48103 (workspace=48101, skills=48102).
 PORT = int(get_env_var("PORT", "48103"))
 
@@ -76,9 +106,22 @@ def _normalise_status(status: Any) -> str:
     return "pending"
 
 
+# In --in-memory mode every call must reuse ONE connection: a fresh
+# ``:memory:`` connection gets its own empty database, so the plan would vanish
+# between tool calls. We keep a single shared connection alive for the process.
+_mem_conn: Optional[sqlite3.Connection] = None
+
+
 def _connect() -> sqlite3.Connection:
-    """Open the database (creating the folder/file), with WAL so the UI can read
-    while we write, and a busy timeout so concurrent access doesn't error out."""
+    """Return a database connection. For a file database this is a fresh
+    connection (WAL, so the UI can read while we write); for ``--in-memory`` it is
+    a single shared, process-lifetime connection holding the throwaway plan."""
+    global _mem_conn
+    if IN_MEMORY:
+        if _mem_conn is None:
+            _mem_conn = sqlite3.connect(":memory:", timeout=5, check_same_thread=False)
+            _mem_conn.execute("PRAGMA busy_timeout=5000")
+        return _mem_conn
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -316,11 +359,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--tool-prefix", type=str, default="todo_", help="Prefix for MCP tools")
     parser.add_argument("--mcp-name", type=str, default="Todo", help="MCP name, default: Todo")
+    parser.add_argument("--session", type=str, default="", help="Session id: store the database at <alexis-home>/sessions/<id>.todo.sqlite (where alexis-home is $AI_AGENT_ALEXIS_HOME or ~/.alexis), instead of the project-local .agents/repository/todo.sqlite. An explicit DB env var still overrides this.")
+    parser.add_argument("--in-memory", dest="in_memory", action="store_true", help="Keep the plan in memory only — nothing is written to disk and it is discarded when the process exits. Used by subagents so they leave no todo files behind.")
 
     args = parser.parse_args()
 
     # In stdio mode standard out must stay clean for JSON-RPC, so logs go to stderr.
-    print(f"[*] Todo MCP server — database: {os.path.abspath(DB_PATH)}", file=sys.stderr)
+    _db_label = "(in-memory)" if IN_MEMORY else os.path.abspath(DB_PATH)
+    print(f"[*] Todo MCP server — database: {_db_label}", file=sys.stderr)
     if ENV_PREFIX:
         actual_prefix = ENV_PREFIX if ENV_PREFIX.endswith("_") else f"{ENV_PREFIX}_"
         print(

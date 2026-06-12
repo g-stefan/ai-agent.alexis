@@ -24,6 +24,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 
+from . import session as session_store
 from .model.llm_driver_factory import create_llm_driver, get_available_drivers as get_llm_drivers
 from .model.llm_driver import LLMDriver
 from .ui.ui_driver_factory import create_ui_driver, get_available_driver_names as get_ui_driver_names
@@ -357,10 +358,11 @@ SPECIAL_MCP_SERVERS: Dict[str, Dict[str, Any]] = {
     },
     "todo": {
         "env_base": "MCP_TODO",
-        # Project-bound SQLite under the current folder's .agents, so a plan is
-        # scoped to the project and survives a restart. The UI reads the plan
-        # over MCP (resources/read todo://current), not from this file.
-        "env_defaults": {"MCP_TODO_DB": DEFAULT_TODO_DB},
+        # No default DB env: the CLI passes --session <id> so the server stores
+        # the plan at ~/.alexis/sessions/<id>.todo.sqlite (per-directory session).
+        # Without a session (legacy/--no-session) the server falls back to its own
+        # project-local default. A user-set MCP_TODO_DB still overrides everything.
+        "env_defaults": {},
     },
 }
 
@@ -1167,7 +1169,9 @@ async def async_main():
 
     parser.add_argument("input", type=str, nargs='?', default=None, help="Path to a text file containing the prompt, or the direct prompt string itself.")
     parser.add_argument("-p", "--prompt", type=str, default=None, help="Pass a direct string on the command line to use as the prompt.")
-    parser.add_argument("--session", type=str, help="Path to a JSON file to save/load the chat history for continuous conversations.")
+    parser.add_argument("--session", type=str, help="Path to a JSON file to save/load the chat history (legacy mode). When given it overrides and disables the automatic per-directory session under ~/.alexis/sessions.")
+    parser.add_argument("--no-session", dest="no_session", action="store_true", help="Disable the automatic per-directory session (history + todo stored under ~/.alexis/sessions, keyed by the current folder). History is then kept in memory for this run only.")
+    parser.add_argument("--sessions-prune-days", type=int, default=None, help="Remove stored sessions (their history + todo databases under ~/.alexis/sessions) not used in the last N days, then continue. The current directory's session is never pruned.")
     parser.add_argument("--system", type=str, help="Path to a markdown text file containing the system message.")
     parser.add_argument("--cmd", action="store_true", help="Clean/command mode for scripts and CI: reset all the on-by-default capabilities (--agent-use-system-md/-agents-md/-skills, --agent-use-mcp-<name>, --agent-internal-mcp-subagent) to OFF and default --ui-driver to 'simple', and ignore the [agent] section of config.jsonc. Provider connection settings still apply; opt back into any capability with its explicit --agent-use-* flag (which always wins).")
     parser.add_argument("--agent-use-system-md", action=argparse.BooleanOptionalAction, default=None, help="Prepend .agents/SYSTEM.md (from the current folder) to the system prompt when it exists. The user-global ~/.alexis/SYSTEM.md (override home via AI_AGENT_ALEXIS_HOME) is always included when present, regardless of this flag. (default: on; use --no-agent-use-system-md to disable)")
@@ -1369,6 +1373,40 @@ async def async_main():
     if args.ui_driver == "api" and not args.api_port:
         args.api_port = 48010
 
+    # ── Per-directory session (history + todo under ~/.alexis/sessions) ──
+    # Resolved here, BEFORE the bundled-MCP loop, so the todo server can be
+    # pointed at this session's database via --session. The session id is a
+    # sha256 of the current folder, so re-running here resumes the same session.
+    # Auto-session is ON by default for interactive/web modes; an explicit
+    # --session PATH selects the legacy JSON flow and --no-session disables it.
+    #   session_id   — drives the todo server's --session (and the history db).
+    #   history_path — conversation persistence; None for subagents (ephemeral).
+    # Subagents get neither: their todo server runs --in-memory (no files) and
+    # they don't persist history — see the bundled-MCP loop below.
+    session_id = None
+    history_path = None
+    _is_subagent = getattr(args, 'agent_as_mcp_server', False)
+    if not _is_subagent:
+        _auto_session = (
+            not args.session
+            and not getattr(args, 'no_session', False)
+            and (args.ui_driver in ("interactive", "textual", "api") or bool(args.api_port))
+        )
+        _do_prune = getattr(args, 'sessions_prune_days', None) is not None
+        if _auto_session or _do_prune:
+            _home = alexis_home()
+            session_store.registry_init(_home)
+            if _auto_session:
+                session_id = session_store.session_id_for_cwd()
+                history_path = session_store.history_db_path(_home, session_id)
+                session_store.history_init(history_path)
+                session_store.registry_touch(_home, session_id, os.path.abspath(os.getcwd()))
+                print(f"\033[94m[*] Session {session_id[:12]} (this folder) — history at {history_path}\033[0m", file=sys.stderr)
+            if _do_prune:
+                _pruned = session_store.prune_sessions(_home, args.sessions_prune_days, keep_id=session_id)
+                if _pruned:
+                    print(f"\033[94m[*] Pruned {len(_pruned)} stale session(s) from ~/.alexis/sessions.\033[0m", file=sys.stderr)
+
     # Bundled MCP servers: for each enabled --agent-use-mcp-<name>, attach
     # mcp/mcp-server-<name>.py (stdio) and apply its env defaults. The subagent
     # forwarding below re-reads each server's resolved on/off state from args.
@@ -1387,6 +1425,14 @@ async def async_main():
         _spec = bundled_mcp_server_spec(_name)
         _env_base = _spec.get("env_base")
         _endpoint = f"{shlex.quote(sys.executable)} {shlex.quote(_script)} --stdio"
+        # Point the bundled todo server at this directory's session database
+        # (~/.alexis/sessions/<id>.todo.sqlite) instead of the project folder.
+        # A subagent runs its todo in-memory so it leaves no files behind.
+        if _name == "todo":
+            if _is_subagent:
+                _endpoint += " --in-memory"
+            elif session_id:
+                _endpoint += f" --session {shlex.quote(session_id)}"
         if getattr(args, 'mcp_configs', None) is None:
             args.mcp_configs = []
         args.mcp_configs.append({"endpoint": _endpoint, "api_key": None, "env_base": _env_base})
@@ -1599,7 +1645,13 @@ async def async_main():
         except Exception as e:
             print(f"\033[91m[!] Error loading session '{args.session}': {e}\033[0m", file=sys.stderr)
             sys.exit(1)
-            
+    elif history_path:
+        # Auto per-directory session: resume this folder's stored history.
+        messages = session_store.history_load(history_path)
+        session_msg_count = len(messages)
+        if session_msg_count:
+            print(f"\033[94m[*] Resumed session ({session_msg_count} messages) from {history_path}\033[0m", file=sys.stderr)
+
     if args.usage_file and os.path.exists(args.usage_file):
         try:
             with open(args.usage_file, 'r', encoding='utf-8') as f:
@@ -1889,6 +1941,9 @@ async def async_main():
                 try:
                     with open(args.session, 'w', encoding='utf-8') as f: json.dump(messages, f, indent=2)
                 except Exception: pass
+            elif history_path:
+                # Auto per-directory session: persist the conversation to sqlite.
+                session_store.history_save(history_path, messages)
             if args.usage_file and usage_tracker:
                 try:
                     with open(args.usage_file, 'w', encoding='utf-8') as f: json.dump(usage_tracker, f, indent=2)
@@ -1922,6 +1977,33 @@ async def async_main():
                 new_path = f"{base}-{datetime.now():%Y%m%d-%H%M%S}{ext or '.json'}"
                 args.session = new_path
             return new_path
+
+        async def session_reset():
+            """Full per-directory reset: wipe the conversation (keeping the system
+            prompt) AND the todo plan, so the session can be retried clean. Unlike
+            the legacy reset, the per-folder session id never rotates — it is
+            wiped in place. The todo database is held open by the todo MCP server,
+            so it's cleared *logically* over MCP (todo_clear), not by deleting the
+            file. Returns the (unchanged) history path."""
+            nonlocal session_msg_count
+            system_msgs = [m for m in messages if m.get("role") == "system"]
+            messages.clear()
+            messages.extend(system_msgs)
+            session_msg_count = len(messages)
+            try:
+                usage_tracker.clear()
+            except Exception:
+                pass
+            if history_path:
+                session_store.history_save(history_path, messages)
+                if session_id:
+                    session_store.registry_reset_begin(alexis_home(), session_id)
+            if todo_session is not None:
+                try:
+                    await todo_session.call_tool("todo_clear", {})
+                except Exception as e:
+                    print(f"\033[93m[!] todo_clear failed during reset: {e}\033[0m", file=sys.stderr)
+            return history_path
 
         # Build a short display name for each configured MCP server.
         def _mcp_display_name(endpoint: str) -> str:
@@ -2105,12 +2187,13 @@ async def async_main():
                 llm_driver=llm_driver,
                 api_host=args.api_host,
                 api_port=args.api_port,
-                session_path=args.session,
+                session_path=args.session or history_path,
                 context_limit=args.context_limit,
                 reasoning_effort=args.reasoning_effort,
                 mcp_servers=mcp_server_names,
                 skills_count=skills_count,
                 reset_session=reset_session,
+                session_reset=(session_reset if history_path else None),
                 join_tool_processing=args.join_tool_processing,
                 todo_provider=todo_provider,
             )

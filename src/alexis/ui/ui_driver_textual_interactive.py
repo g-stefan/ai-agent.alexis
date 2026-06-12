@@ -1029,6 +1029,19 @@ if TEXTUAL_AVAILABLE:
             event.stop()
             self.post_message(self.Pressed())
 
+    class ResetButton(Static):
+        """Button beside Stop that asks to wipe the session (history + todo)."""
+
+        class Pressed(Message):
+            pass
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__("⟲ Reset", **kwargs)
+
+        def on_click(self, event: events.Click) -> None:
+            event.stop()
+            self.post_message(self.Pressed())
+
     class MultiLineInput(Vertical):
         """Multi-line input widget with attachment bar and custom TextArea."""
 
@@ -1044,6 +1057,7 @@ if TEXTUAL_AVAILABLE:
             yield self.input_area
             with Horizontal(id="input-bar"):
                 yield StopButton(id="stop-btn")
+                yield ResetButton(id="reset-btn")
                 yield Static("Enter: send   Ctrl+J: new line   /help: commands",
                              id="input-hint")
 
@@ -1206,7 +1220,7 @@ if TEXTUAL_AVAILABLE:
             "[bold]Slash commands[/bold] (type in the input box)\n"
             "  /quit, /exit   Exit the agent\n"
             "  /stop          Stop the model while it is processing\n"
-            "  /reset         Reset history and start a new session\n"
+            "  /reset         Reset the session — wipe history AND the todo plan\n"
             "  /clear         Clear the conversation\n"
             "  /save          Save the current session\n"
             "  /load [path]   Load a session\n"
@@ -1285,6 +1299,31 @@ if TEXTUAL_AVAILABLE:
 
         def on_input_submitted(self, event: "Input.Submitted") -> None:
             self.dismiss(event.value.strip())
+
+    class ConfirmResetScreen(DialogScreen):
+        """Modal asking the user to confirm a session reset. Dismisses True on
+        Yes, None on Cancel / Esc / ✕."""
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="themed-dialog"):
+                yield DialogTitleBar("Reset session", classes="dialog-title-bar")
+                with Vertical(classes="dialog-body"):
+                    yield Static(
+                        "This wipes the conversation history AND the todo plan "
+                        "for this folder. This cannot be undone. Continue?",
+                        classes="dialog-label")
+                    with Horizontal(classes="dialog-buttons"):
+                        yield Button("Yes, reset", id="confirm-reset-yes",
+                                     classes="menu-option")
+                        yield Button("Cancel", id="confirm-reset-cancel",
+                                     classes="menu-option")
+
+        def on_mount(self) -> None:
+            # Focus Cancel by default so an accidental Enter doesn't wipe.
+            self.query_one("#confirm-reset-cancel", Button).focus()
+
+        def on_button_pressed(self, event: "Button.Pressed") -> None:
+            self.dismiss(event.button.id == "confirm-reset-yes")
 
     class TodoScreen(DialogScreen):
         """Read-only modal showing the full todo plan: the description and the
@@ -1486,7 +1525,7 @@ if TEXTUAL_AVAILABLE:
             background: #1a1a2e;
             color: #1a1a2e;
         }
-        /* Bottom row of the input: Stop button (left) + hint (right). */
+        /* Bottom row of the input: Stop + Reset buttons (left) + hint (right). */
         #input-bar {
             height: 1;
             background: #1a1a2e;
@@ -1501,6 +1540,19 @@ if TEXTUAL_AVAILABLE:
         }
         #stop-btn:hover {
             background: #802020;
+            color: white;
+        }
+        #reset-btn {
+            width: auto;
+            height: 1;
+            padding: 0 1;
+            margin-left: 1;
+            background: #2a2418;
+            color: #ffb060;
+            text-style: bold;
+        }
+        #reset-btn:hover {
+            background: #806020;
             color: white;
         }
         #input-hint {
@@ -1620,7 +1672,7 @@ if TEXTUAL_AVAILABLE:
            name on the left and a ✕ close button on the right, then a padded
            body. Colours come from the same palette as the rest of the UI
            (#1a1a2e panels, #2a2a50 highlights, #4040a0 / #8080ff accents). */
-        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen {
+        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen, ConfirmResetScreen {
             align: center middle;
             background: black 55%;
         }
@@ -1763,7 +1815,8 @@ if TEXTUAL_AVAILABLE:
         def __init__(self, context_limit=None, run_callback=None, messages=None,
                      save_state=None, session_path=None, thinking_enabled=False,
                      mcp_servers=None, skills_count=None, reset_session=None,
-                     join_tool_processing=True, todo_provider=None):
+                     join_tool_processing=True, todo_provider=None,
+                     session_reset=None):
             super().__init__()
             self.context_limit = context_limit
             # Async callable that fetches the current todo plan over MCP, or None
@@ -1785,6 +1838,9 @@ if TEXTUAL_AVAILABLE:
             # Backend hook to start a fresh session (clears history, rotates the
             # session file). Optional — falls back to a local clear if absent.
             self.reset_session = reset_session
+            # Async hook for the per-directory session: full wipe of history +
+            # todo. Preferred over reset_session when present (auto-session mode).
+            self.session_reset = session_reset
             # Manual sidebar override: None = follow terminal width, True/False =
             # user forced it shown/hidden via Ctrl+B (sticks past resizes).
             self._stats_override: Optional[bool] = None
@@ -1882,7 +1938,7 @@ if TEXTUAL_AVAILABLE:
             register(["stop"], lambda arg: self._stop_processing(),
                      "Stop the model while it is processing")
             register(["reset"], lambda arg: self._reset_session(),
-                     "Reset the conversation and start a new session")
+                     "Reset the session — wipe history and the todo plan")
             register(["save"], lambda arg: self._do_save(),
                      "Save the current session")
             register(["load"],
@@ -2113,6 +2169,15 @@ if TEXTUAL_AVAILABLE:
             message.stop()
             self._stop_processing()
 
+        def on_reset_button_pressed(self, message: "ResetButton.Pressed") -> None:
+            message.stop()
+            # Confirm before wiping; only reset when the user picks Yes.
+            self.push_screen(ConfirmResetScreen(), self._on_confirm_reset)
+
+        def _on_confirm_reset(self, confirmed: Optional[bool]) -> None:
+            if confirmed:
+                self._reset_session()
+
         def _reset_session(self) -> None:
             """Start a brand-new session: stop any running turn, clear history,
             and rotate the session file via the backend hook."""
@@ -2125,7 +2190,18 @@ if TEXTUAL_AVAILABLE:
 
         async def _do_reset(self) -> None:
             new_path = None
-            if self.reset_session:
+            wiped = False
+            if self.session_reset:
+                # Per-directory session: async full wipe of history + todo. Runs
+                # on the app's event loop (this is a worker), so the MCP todo_clear
+                # it awaits is on the right loop.
+                try:
+                    new_path = await self.session_reset()
+                    wiped = True
+                except Exception as e:
+                    self.notify(f"Reset failed: {e}", severity="error")
+                    return
+            elif self.reset_session:
                 try:
                     new_path = self.reset_session()
                 except Exception as e:
@@ -2148,9 +2224,13 @@ if TEXTUAL_AVAILABLE:
                 "history_tokens": 0, "tools_tokens": 0, "new_tokens": 0,
                 "thinking_tokens": 0, "answer_tokens": 0,
             })
-            target = self.session_path or "in-memory session"
-            self.notify(f"New session started ({target}).",
-                        severity="information", timeout=3)
+            if wiped:
+                self.notify("Session reset — history and todo cleared.",
+                            severity="information", timeout=3)
+            else:
+                target = self.session_path or "in-memory session"
+                self.notify(f"New session started ({target}).",
+                            severity="information", timeout=3)
 
         def update_stats(self, new_stats: Dict[str, Any]) -> None:
             """Update statistics panel and context map."""
@@ -2465,6 +2545,7 @@ class TextualInteractiveUIDriver(UIDriver):
                 reset_session=kwargs.get("reset_session"),
                 join_tool_processing=kwargs.get("join_tool_processing", True),
                 todo_provider=kwargs.get("todo_provider"),
+                session_reset=kwargs.get("session_reset"),
             )
             await app.run_async()
             save_state()

@@ -321,12 +321,34 @@ class APIUIDriver(UIDriver):
             return web.json_response({"messages": messages})
 
         async def api_clear(request):
-            """POST /clear - Clear chat history."""
+            """POST /clear - Clear chat history (lightweight: messages only)."""
             sys_msg = [m for m in messages if m.get("role") == "system"]
             messages.clear()
             messages.extend(sys_msg)
             save_state()
             return web.json_response({"status": "cleared"})
+
+        # Full per-directory session reset: wipe history AND the todo plan. The
+        # backend hook (cli.session_reset) clears the in-memory messages, the
+        # history sqlite, and the live todo over MCP. Runs on this aiohttp event
+        # loop, which is the same loop the MCP session lives on.
+        session_reset = kwargs.get("session_reset")
+
+        async def api_session_reset(request):
+            """POST /session/reset - wipe history + todo for a clean retry."""
+            if session_reset is not None:
+                try:
+                    await session_reset()
+                except Exception as e:
+                    return web.json_response(
+                        {"status": "error", "detail": str(e)}, status=500)
+            else:
+                # No session backend: fall back to a plain history clear.
+                sys_msg = [m for m in messages if m.get("role") == "system"]
+                messages.clear()
+                messages.extend(sys_msg)
+                save_state()
+            return web.json_response({"status": "reset"})
 
         app.add_routes([
             web.get('/', api_index),
@@ -335,7 +357,8 @@ class APIUIDriver(UIDriver):
             web.get('/capabilities', api_capabilities),
             web.post('/chat', api_chat),
             web.get('/history', api_history),
-            web.post('/clear', api_clear)
+            web.post('/clear', api_clear),
+            web.post('/session/reset', api_session_reset)
         ])
 
         runner = web.AppRunner(app)
@@ -358,7 +381,7 @@ class APIUIDriver(UIDriver):
 
         print(f"\n\033[92m[*] GUI API Server listening on http://{api_host}:{api_port}\033[0m", file=sys.stderr)
         print(f"\033[96m    - Open the web client: {web_ui_url}\033[0m", file=sys.stderr)
-        print(f"\033[90m    - Endpoints: GET /, GET /version, GET /capabilities, POST /chat, GET /history, POST /clear\033[0m", file=sys.stderr)
+        print(f"\033[90m    - Endpoints: GET /, GET /version, GET /capabilities, POST /chat, GET /history, POST /clear, POST /session/reset\033[0m", file=sys.stderr)
 
         try:
             # Keep server alive indefinitely

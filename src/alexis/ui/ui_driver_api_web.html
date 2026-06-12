@@ -145,6 +145,9 @@
             <button id="clear-btn" class="text-red-500 hover:bg-red-900 hover:text-white px-2 py-1 border border-transparent transition-colors">
                 [CLEAR_LOG]
             </button>
+            <button id="reset-btn" title="Wipe history AND the todo plan for this folder" class="text-red-500 hover:bg-red-900 hover:text-white px-2 py-1 border border-transparent transition-colors">
+                [RESET_SESSION]
+            </button>
         </div>
     </header>
 
@@ -212,6 +215,7 @@
             const fileBtn = document.getElementById('file-btn');
             const filePreviewContainer = document.getElementById('file-preview-container');
             const clearBtn = document.getElementById('clear-btn');
+            const resetBtn = document.getElementById('reset-btn');
             const appTitle = document.getElementById('app-title');
             const procLoader = document.getElementById('proc-loader');
             const statusIndicator = document.getElementById('status-indicator');
@@ -724,6 +728,25 @@
                         showToast("Failed to purge server logs.");
                         chatContainer.innerHTML = '';
                         renderGreeting();
+                    }
+                }
+            });
+
+            // Full session reset: wipes this folder's history AND todo plan so a
+            // failed run can be retried clean.
+            if (resetBtn) resetBtn.addEventListener('click', async () => {
+                if(confirm("Reset session? This wipes the conversation history AND the todo plan for this folder.")) {
+                    try {
+                        const response = await fetch(`${getBaseUrl()}/session/reset`, { method: 'POST', mode: 'cors' });
+                        if (response.ok) {
+                            chatContainer.innerHTML = '';
+                            renderGreeting();
+                            showToast("Session reset — history and todo cleared.", false);
+                        } else {
+                            throw new Error('Server error');
+                        }
+                    } catch (error) {
+                        showToast("Failed to reset session.");
                     }
                 }
             });
