@@ -1,19 +1,19 @@
 ---
 name: toolbox
-description: Use this skill when the user asks for the current date or time, wants some text rendered as a big ASCII-art banner, or wants to evaluate a math expression. Runs the bundled helper scripts via run_skill_script.
+description: Use this skill when the user asks for the current date or time, wants some text rendered as a big ASCII-art banner, or wants to evaluate a math expression. Runs the bundled helper scripts via skill_run.
 license: MIT
 ---
 
 # Toolbox
 
-Small utility scripts. Run them with the `run_skill_script` tool, passing
+Small utility scripts. Run them with the `skill_run` tool, passing
 `skill="toolbox"`, the script `name`, and any `arguments`.
 
-| Script      | What it does                       | Example call                                                                 |
-|-------------|------------------------------------|------------------------------------------------------------------------------|
-| `date`      | Print the current date/time        | `run_skill_script(skill="toolbox", name="date")`                             |
-| `ascii_art` | Render text as an ASCII-art banner | `run_skill_script(skill="toolbox", name="ascii_art", arguments=["HELLO"])`   |
-| `calc`      | Evaluate a math expression         | `run_skill_script(skill="toolbox", name="calc", arguments=["2 * (3 + 4)"])`  |
+| Script      | What it does                       | Example call                                                          |
+|-------------|------------------------------------|----------------------------------------------------------------------|
+| `date`      | Print the current date/time        | `skill_run(skill="toolbox", name="date")`                            |
+| `ascii_art` | Render text as an ASCII-art banner | `skill_run(skill="toolbox", name="ascii_art", arguments=["HELLO"])`  |
+| `calc`      | Evaluate a math expression         | `skill_run(skill="toolbox", name="calc", arguments=["2 * (3 + 4)"])` |
 
 ## date
 - Optional first argument: a `strftime` format string.

@@ -40,7 +40,7 @@ DEFAULT_AGENT_DIR = ".agents"
 # Parse command line options to customize server details
 pre_parser = argparse.ArgumentParser(add_help=False)
 pre_parser.add_argument("--env-base", type=str, default="")
-pre_parser.add_argument("--tool-prefix", type=str, default="")
+pre_parser.add_argument("--tool-prefix", type=str, default="skill_")
 pre_parser.add_argument("--mcp-name", type=str, default="Skills")
 pre_parser.add_argument("--agent-dir", type=str, default=DEFAULT_AGENT_DIR)
 pre_args, _ = pre_parser.parse_known_args()
@@ -61,7 +61,7 @@ HTTP_PORT = int(get_env_var("PORT", "48102"))
 # Max seconds a single skill script may run before it is killed.
 EXEC_TIMEOUT = int(get_env_var("EXEC_TIMEOUT", "120"))
 
-# Max characters returned from a single read_skill_file call.
+# Max characters returned from a single skill_read call.
 MAX_READ_CHARS = int(get_env_var("MAX_READ_CHARS", str(256 * 1024)))
 
 
@@ -91,7 +91,7 @@ def _resolve_skill_root(skill: str) -> Optional[str]:
 # Initialize the FastMCP Server
 mcp = FastMCP(MCP_NAME, stateless_http=True, json_response=False)
 
-@mcp.tool(name=f"{TOOL_PREFIX}run_skill_script")
+@mcp.tool(name=f"{TOOL_PREFIX}run")
 async def tool_run_skill_script(skill: str, name: str, arguments: Optional[List[str]] = None) -> Any:
     """
     Run a Python script bundled with a skill and return its output.
@@ -243,7 +243,7 @@ async def tool_run_skill_script(skill: str, name: str, arguments: Optional[List[
         return f"Error executing command '{script_file_name}': {str(e)}"
 
 
-@mcp.tool(name=f"{TOOL_PREFIX}read_skill_file")
+@mcp.tool(name=f"{TOOL_PREFIX}read")
 async def tool_read_skill_file(skill: str, file: str = "SKILL.md") -> str:
     """
     Read a text file bundled with a skill and return its contents.
@@ -333,8 +333,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tool-prefix",
         type=str,
-        default="",
-        help="Prefix for MCP tool",
+        default="skill_",
+        help="Prefix for MCP tool names (default: skill_, so tools are exposed as skill_run / skill_read)",
     )
 
     args = parser.parse_args()

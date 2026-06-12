@@ -53,7 +53,7 @@ include = ["alexis*"]
 # importlib.resources. Without these, the agent's bundled MCP servers, web UI,
 # and version file would be missing from a `pip install`/wheel (only `-e .`
 # would have worked, since that points back at the source tree).
-"alexis" = ["data/*.json"]
+"alexis" = ["data/*.json", "skills/*/SKILL.md", "skills/*/scripts/*", "*.md"]
 "alexis.mcp" = ["*.py"]
 "alexis.ui" = ["*.html"]
 

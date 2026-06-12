@@ -26,11 +26,11 @@ test/
 
 ## Runnable skill (toolbox)
 The `toolbox` skill bundles Python scripts the model runs via the skills MCP
-server's `run_skill_script` tool. Enable it with `--agent-use-mcp-skills`.
+server's `skill_run` tool. Enable it with `--agent-use-mcp-skills`.
 
 | Ask for…                          | Runs                                                          |
 |-----------------------------------|--------------------------------------------------------------|
-| "what's the date / time"          | `run_skill_script(skill="toolbox", name="date")`             |
+| "what's the date / time"          | `skill_run(skill="toolbox", name="date")`                    |
 | "make an ASCII banner of HELLO"   | `…name="ascii_art", arguments=["HELLO"]`                     |
 | "what is 2 * (3 + 4)"             | `…name="calc", arguments=["2 * (3 + 4)"]`                    |
 

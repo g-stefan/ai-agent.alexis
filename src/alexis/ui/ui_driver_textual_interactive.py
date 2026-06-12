@@ -331,6 +331,153 @@ if TEXTUAL_AVAILABLE:
             t.append(" %", style="dim")
             return t
 
+    # status -> (checkbox glyph, colour). Shared by the side panel and the modal.
+    TODO_STATUS_GLYPH = {
+        "completed":   ("✔", "#5fff5f"),
+        "in_progress": ("◐", "#ffd75f"),
+        "pending":     ("☐", "#6a6a8a"),
+    }
+
+    def _todo_counts(items: List[tuple]) -> tuple:
+        """Return (done, total) for a list of (content, status) tuples."""
+        done = sum(1 for _c, s in items if s == "completed")
+        return done, len(items)
+
+    def _todo_truncate(text: str, width: int) -> str:
+        """Flatten to one line and clip to `width` cells, ending in '...' when
+        cut — so the compact side panel never wraps on a narrow terminal."""
+        text = " ".join(text.split())
+        if width <= 0:
+            return ""
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[:width - 3] + "..."
+
+    def _todo_item_text(content: str, status: str) -> Text:
+        """One checklist line: coloured checkbox + content (struck when done)."""
+        glyph, color = TODO_STATUS_GLYPH.get(status, TODO_STATUS_GLYPH["pending"])
+        t = Text()
+        t.append(glyph, style=color)
+        t.append("  ")  # gap between the status glyph and the text (unstruck)
+        t.append(content, style="strike #6a6a8a" if status == "completed"
+                 else "#d0d0e0")
+        return t
+
+    def _todo_progress_text(done: int, total: int, width: int = 12) -> Text:
+        """A filled/empty progress bar, e.g. ▰▰▰▱▱. The ``done/total`` count is
+        appended by the caller. With no items it's an all-gray (empty) bar."""
+        t = Text()
+        if total <= 0:
+            t.append("▱" * width, style="#3a3a4a")  # empty gray bar (0/0)
+            return t
+        filled = round(width * done / total)
+        # Green while in progress, brighter green once everything is done.
+        bar_color = "#5fff5f" if done == total else "#3fa33f"
+        t.append("▰" * filled, style=bar_color)
+        t.append("▱" * (width - filled), style="#3a3a4a")
+        return t
+
+    class TodoPanel(Static):
+        """Compact, clickable side-panel summary of the persistent todo plan.
+
+        The plan is fetched *over MCP*: the panel calls an injected async provider
+        that issues a ``resources/read`` for ``todo://current`` and returns the
+        parsed JSON. The UI therefore never touches the database file and doesn't
+        need to know where it lives; the same call restores a plan from a previous
+        run (resume). A short timer re-asks so the model's updates appear live.
+
+        The panel shows the progress (``done/total``) and the active item;
+        clicking it opens a read-only modal with the description and full
+        checklist (see :class:`TodoScreen`)."""
+
+        def __init__(self, provider: Callable, **kwargs):
+            super().__init__(**kwargs)
+            # Async zero-arg callable returning the plan dict (or None).
+            self._provider = provider
+            self._description = ""
+            self._items: List[tuple] = []   # (content, status)
+            self._loaded = False
+            self._refreshing = False
+
+        def on_mount(self) -> None:
+            self.set_interval(1.0, self._tick)  # keep in sync with the model
+            self._tick()                        # initial load / resume
+
+        def _tick(self) -> None:
+            # A simple in-flight guard, NOT an exclusive worker. An exclusive
+            # worker can be cancelled *after* it fetched new data but *before* it
+            # repainted (e.g. the next tick fires while the model is busy firing
+            # tool calls), leaving the panel stale until some unrelated event (a
+            # hover) forces a repaint. The guard instead lets each fetch finish
+            # and paint, and just skips ticks while one is still running.
+            if self._refreshing:
+                return
+            self._refreshing = True
+            self.run_worker(self._refresh(), group="todo-refresh")
+
+        async def _refresh(self) -> None:
+            try:
+                state = await self._provider()
+                if isinstance(state, dict):
+                    items = state.get("items") or []
+                    self._description = str(state.get("description") or "")
+                    self._items = [
+                        (str(it.get("content", "")), str(it.get("status", "pending")))
+                        for it in items if isinstance(it, dict)
+                    ]
+                    self._loaded = True
+                    # layout=True so the widget's auto height tracks the line
+                    # count (the plan loads after mount, and items come and go).
+                    self.refresh(layout=True)
+                    # Mirror live updates into the modal if it's open.
+                    screen = self.app.screen
+                    if isinstance(screen, TodoScreen):
+                        screen.update_plan(self._description, list(self._items))
+            except Exception:
+                # Transient (e.g. a request raced a turn teardown) — keep the
+                # last good view rather than flicker to empty.
+                pass
+            finally:
+                self._refreshing = False
+
+        def on_click(self, event: events.Click) -> None:
+            event.stop()
+            if self._loaded and (self._items or self._description):
+                self.app.push_screen(
+                    TodoScreen(self._description, list(self._items)))
+
+        def render(self):
+            # Clean title like the other side panels; the count lives next to
+            # the progress bar below.
+            t = Text()
+            t.append("TODO\n", style="bold cyan")
+            # Content width of the panel; fall back before the first layout.
+            width = self.size.width or 24
+            done, total = _todo_counts(self._items)
+            if self._description:
+                # One-line gist; the full text lives in the click-through modal.
+                t.append(_todo_truncate(self._description, width) + "\n",
+                         style="italic #b0b0d0")
+            # Progress bar always shown (gray 0/0 when empty, full green when all
+            # done), with the count right beside it.
+            t.append(_todo_progress_text(done, total, width=10))
+            t.append(f" {done}/{total}", style="bold #e0e0f0")
+            # Surface the active item: the in-progress one, else the next pending
+            # one, else (everything done) the last item.
+            active = next(((c, s) for c, s in self._items if s == "in_progress"), None)
+            if active is None:
+                active = next(((c, s) for c, s in self._items if s != "completed"), None)
+            if active is None and self._items:
+                active = self._items[-1]
+            if active is not None:
+                t.append("\n")
+                # Leave room for the 3-cell checkbox prefix ("◐" + 2 spaces).
+                label = _todo_truncate(active[0], max(4, width - 3))
+                t.append(_todo_item_text(label, active[1]))
+            return t
+
     SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     # msg_type -> (title label, css class). The css class drives the left bar
@@ -399,14 +546,14 @@ if TEXTUAL_AVAILABLE:
             byte_count = len(content.encode("utf-8")) if content else 0
             if msg_type == "tool":
                 # Joined tool call + result: everything lives in the title, e.g.
-                # "TOOL - run_skill_script - 12/100 bytes" (sent/received). The
+                # "TOOL - skill_run - 12/100 bytes" (sent/received). The
                 # body stays empty; the copy button yields the full call+result.
                 head = f"{title} - {tool_name}" if tool_name else title
                 self._title = f"{head} - {send_bytes or 0}/{recv_bytes or 0} bytes"
                 self._display_body = ""
             elif msg_type in _TOOL_TYPES:
                 # Tool name (when known) lives in the header, e.g.
-                # "TOOL RESULT - run_skill_script - 100 bytes".
+                # "TOOL RESULT - skill_read - 100 bytes".
                 head = f"{title} - {tool_name}" if tool_name else title
                 self._title = f"{head} - {byte_count} bytes"
                 self._display_body = _truncate_tool_body(content)
@@ -1064,7 +1211,12 @@ if TEXTUAL_AVAILABLE:
             "  /save          Save the current session\n"
             "  /load [path]   Load a session\n"
             "  /help          List all slash commands\n\n"
-            "[dim]The ■ Stop button (bottom-left of the input) also stops "
+            "[dim]The right side panel shows live token stats and, when the "
+            "todo system is active, the plan's progress (done/total) — click it "
+            "to open the full read-only checklist (✔ done · ◐ doing · ☐ to do). "
+            "The plan persists across restarts so work can be resumed. "
+            "Ctrl+B hides/shows the panel.\n"
+            "The ■ Stop button (bottom-left of the input) also stops "
             "processing.\nPress Esc or click Close to dismiss.[/dim]"
         )
 
@@ -1133,6 +1285,69 @@ if TEXTUAL_AVAILABLE:
 
         def on_input_submitted(self, event: "Input.Submitted") -> None:
             self.dismiss(event.value.strip())
+
+    class TodoScreen(DialogScreen):
+        """Read-only modal showing the full todo plan: the description and the
+        complete checklist with status checkboxes. Opened by clicking the TODO
+        side panel. The user only views the plan here — there are no controls
+        beyond closing (Esc / ✕ / Close). It refreshes in place if the plan
+        changes while open (see :meth:`update_plan`)."""
+
+        def __init__(self, description: str, items: List[tuple], **kwargs):
+            super().__init__(**kwargs)
+            self._description = description
+            self._items = items  # list of (content, status)
+
+        @staticmethod
+        def _progress_line(done: int, total: int) -> Text:
+            """Progress bar with the done/total count beside it (modal view)."""
+            t = _todo_progress_text(done, total, width=24)
+            t.append(f"  {done}/{total} done", style="bold #e0e0f0")
+            return t
+
+        def compose(self) -> ComposeResult:
+            done, total = _todo_counts(self._items)
+            with Vertical(classes="themed-dialog", id="todo-dialog"):
+                yield DialogTitleBar("Todo", classes="dialog-title-bar")
+                with Vertical(classes="dialog-body"):
+                    desc = self._description.strip()
+                    yield Static(Text(desc) if desc else Text("no description", style="dim"),
+                                 id="todo-desc")
+                    yield Static(self._progress_line(done, total),
+                                 id="todo-progress")
+                    with VerticalScroll(id="todo-items"):
+                        for content, status in self._items:
+                            yield Static(_todo_item_text(content, status),
+                                         classes="todo-item")
+                        if not self._items:
+                            yield Static("No items yet.", classes="todo-empty")
+                    yield Button("Close", id="todo-close", classes="menu-option")
+
+        def update_plan(self, description: str, items: List[tuple]) -> None:
+            """Replace the displayed plan in place (live updates while open)."""
+            self._description = description
+            self._items = items
+            try:
+                done, total = _todo_counts(items)
+                desc = description.strip()
+                self.query_one("#todo-desc", Static).update(
+                    Text(desc) if desc else Text("no description", style="dim"))
+                self.query_one("#todo-progress", Static).update(
+                    self._progress_line(done, total))
+                box = self.query_one("#todo-items", VerticalScroll)
+                box.remove_children()
+                if items:
+                    for content, status in items:
+                        box.mount(Static(_todo_item_text(content, status),
+                                         classes="todo-item"))
+                else:
+                    box.mount(Static("No items yet.", classes="todo-empty"))
+            except Exception:
+                # Modal mid-teardown or not yet mounted — ignore.
+                pass
+
+        def on_button_pressed(self, event: "Button.Pressed") -> None:
+            self.dismiss(None)
 
     class ChatApp(App):
         """Main Textual application for chat."""
@@ -1220,6 +1435,15 @@ if TEXTUAL_AVAILABLE:
         }
         #stats-numbers {
             height: auto;
+        }
+        #todo {
+            height: auto;
+            margin-bottom: 1;
+        }
+        /* The panel is clickable (opens the read-only plan modal) — tint on
+           hover so it reads as interactive. */
+        #todo:hover {
+            background: #20203a;
         }
         #context-map {
             height: auto;
@@ -1396,10 +1620,26 @@ if TEXTUAL_AVAILABLE:
            name on the left and a ✕ close button on the right, then a padded
            body. Colours come from the same palette as the rest of the UI
            (#1a1a2e panels, #2a2a50 highlights, #4040a0 / #8080ff accents). */
-        MenuScreen, HelpScreen, LoadScreen, AddFileScreen {
+        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen {
             align: center middle;
             background: black 55%;
         }
+        /* Read-only todo plan modal. */
+        #todo-dialog { width: 68; }
+        #todo-desc {
+            height: auto;
+            color: #c0c0ff;
+            text-style: italic;
+            margin-bottom: 1;
+        }
+        #todo-progress { height: 1; margin-bottom: 1; }
+        #todo-items {
+            height: auto;
+            max-height: 18;
+            scrollbar-size-vertical: 1;
+        }
+        .todo-item { height: auto; }
+        .todo-empty { color: #6a6a8a; }
         .themed-dialog {
             width: 56;
             max-width: 90%;
@@ -1523,9 +1763,13 @@ if TEXTUAL_AVAILABLE:
         def __init__(self, context_limit=None, run_callback=None, messages=None,
                      save_state=None, session_path=None, thinking_enabled=False,
                      mcp_servers=None, skills_count=None, reset_session=None,
-                     join_tool_processing=True):
+                     join_tool_processing=True, todo_provider=None):
             super().__init__()
             self.context_limit = context_limit
+            # Async callable that fetches the current todo plan over MCP, or None
+            # when the todo server isn't attached — drives whether the TODO side
+            # panel shows and how it gets its data.
+            self.todo_provider = todo_provider
             # When on, a tool call and its result are committed as one TOOL block
             # (title-only) instead of separate TOOL CALL / TOOL RESULT blocks.
             self.join_tool_processing = join_tool_processing
@@ -1556,6 +1800,8 @@ if TEXTUAL_AVAILABLE:
             with Horizontal(id="main-container"):
                 yield ConversationView(id="conversation")
                 with VerticalScroll(id="stats"):
+                    if self.todo_provider:
+                        yield TodoPanel(self.todo_provider, id="todo")
                     if self.mcp_servers:
                         yield MCPServersPanel(self.mcp_servers, id="mcp-servers")
                     if self.skills_count is not None:
@@ -2218,6 +2464,7 @@ class TextualInteractiveUIDriver(UIDriver):
                 skills_count=kwargs.get("skills_count"),
                 reset_session=kwargs.get("reset_session"),
                 join_tool_processing=kwargs.get("join_tool_processing", True),
+                todo_provider=kwargs.get("todo_provider"),
             )
             await app.run_async()
             save_state()

@@ -287,6 +287,12 @@ def resolve_mcp_server_path(name: str) -> Optional[str]:
     return None
 
 
+# Default location of the todo MCP server's SQLite database: project-bound,
+# under the current folder's .agents. Shared by the server's env default and the
+# UI panel so both read/write exactly the same file.
+DEFAULT_TODO_DB = os.path.join(".agents", "repository", "todo.sqlite")
+
+
 # Per-server wiring for bundled MCP servers attached via --agent-use-mcp-<name>.
 #   env_base     – prefix the stdio client maps into the child env (a <BASE>_FOO
 #                  var is also exposed to the server as FOO); copying the full
@@ -297,12 +303,19 @@ def resolve_mcp_server_path(name: str) -> Optional[str]:
 # and no defaults — set <NAME>_FOO in the environment to pass FOO through.
 SPECIAL_MCP_SERVERS: Dict[str, Dict[str, Any]] = {
     "workspace": {
-        "env_base": "WORKSPACE",
-        "env_defaults": {"WORKSPACE_DIR": ".", "WORKSPACE_HIDE_DOT_DIRS": "yes"},
+        "env_base": "MCP_WORKSPACE",
+        "env_defaults": {"MCP_WORKSPACE_DIR": ".", "MCP_WORKSPACE_HIDE_DOT_DIRS": "yes"},
     },
     "skills": {
         "env_base": "MCP_SKILLS",
         "env_defaults": lambda: {"MCP_SKILLS_AGENT_DIR": ";".join(agent_skill_roots())},
+    },
+    "todo": {
+        "env_base": "MCP_TODO",
+        # Project-bound SQLite under the current folder's .agents, so a plan is
+        # scoped to the project and survives a restart. The UI reads the plan
+        # over MCP (resources/read todo://current), not from this file.
+        "env_defaults": {"MCP_TODO_DB": DEFAULT_TODO_DB},
     },
 }
 
@@ -320,8 +333,9 @@ def bundled_mcp_server_spec(name: str) -> Dict[str, Any]:
 def bundled_mcp_help(name: str) -> str:
     """Help text for the --agent-use-mcp-<name> flag of a bundled server."""
     known = {
-        "workspace": "Attach the bundled workspace filesystem MCP server (mcp/mcp-server-workspace.py) for file operations — equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-workspace.py --stdio\" --mcp-env-base WORKSPACE'. Defaults WORKSPACE_DIR=. and WORKSPACE_HIDE_DOT_DIRS=yes when unset. Forwarded to subagents.",
+        "workspace": "Attach the bundled workspace filesystem MCP server (mcp/mcp-server-workspace.py) for file operations — equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-workspace.py --stdio\" --mcp-env-base MCP_WORKSPACE'. Defaults MCP_WORKSPACE_DIR=. and MCP_WORKSPACE_HIDE_DOT_DIRS=yes when unset. Forwarded to subagents.",
         "skills": "Attach the bundled skills MCP server (mcp/mcp-server-skills.py) so the model can run scripts bundled with skills — equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-skills.py --stdio\" --mcp-env-base MCP_SKILLS'. MCP_SKILLS_AGENT_DIR is a ';'-separated search path; defaults to the agent program folder, then the user-global ~/.alexis (override via AI_AGENT_ALEXIS_HOME), then the current .agents. Forwarded to subagents.",
+        "todo": "Attach the bundled todo MCP server (mcp/mcp-server-todo.py) — a persistent project todo list (plan description + checkable items) the model uses to track multi-step work and resume after a restart. Equivalent to '--mcp \"python <AGENT_PATH>/mcp/mcp-server-todo.py --stdio\" --mcp-env-base MCP_TODO'. Defaults MCP_TODO_DB=.agents/repository/todo.sqlite (project-bound) when unset; the textual UI reads the live plan over MCP (resources/read todo://current), not from the file. Forwarded to subagents.",
     }
     return known.get(
         name,
@@ -1428,7 +1442,7 @@ async def async_main():
         if getattr(args, 'mcp_configs', None) is None:
             args.mcp_configs = []
         # env_base="SUBAGENT" makes the stdio client copy the full parent
-        # environment to the child (API keys, WORKSPACE_DIR, MCP_SKILLS_AGENT_DIR,
+        # environment to the child (API keys, MCP_WORKSPACE_DIR, MCP_SKILLS_AGENT_DIR,
         # ...) and additionally map any SUBAGENT_*-prefixed vars without prefix.
         args.mcp_configs.append({"endpoint": endpoint, "api_key": None, "env_base": "SUBAGENT"})
         done_note = " (with processing_done)" if done_on else ""
@@ -1774,6 +1788,26 @@ async def async_main():
         if args.tool_session:
             tool_history.append({"timestamp": time.time(), "tools": tools_list})
 
+        # The todo MCP server's session, if attached. The UI reads the live plan
+        # through it (MCP resources/read todo://current) instead of touching the
+        # database file, so it never needs to know where the data is stored.
+        todo_session = tool_to_session.get("todo_get")
+
+        async def fetch_todo():
+            """Ask the todo server for the current plan over MCP and return it as
+            a dict. Issues a `resources/read` for `todo://current`; the server
+            answers on the same stdio JSON-RPC stream. Returns None on failure so
+            the UI simply keeps its last view."""
+            if todo_session is None:
+                return None
+            from pydantic import AnyUrl
+            res = await todo_session.read_resource(AnyUrl("todo://current"))
+            for c in getattr(res, "contents", None) or []:
+                text = getattr(c, "text", None)
+                if text:
+                    return json.loads(text)
+            return None
+
         async def run_single_turn(queue=None, cancel_event=None):
             chat_coro = chat_loop(
                 driver=llm_driver,
@@ -1886,7 +1920,7 @@ async def async_main():
             if mcp_server_names:
                 print(f"\033[94m[*] Subagent tools available from: {', '.join(mcp_server_names)}\033[0m", file=sys.stderr)
 
-            async def run_subagent(prompt: str) -> str:
+            async def subagent_run(prompt: str) -> str:
                 """Run a full agentic conversation as a subagent and return the
                 final result (no thinking / tool traces).
 
@@ -1949,7 +1983,7 @@ async def async_main():
                 "returns only the final answer text. Use it to offload a self-contained "
                 "subtask and get back a clean result."
             )
-            subagent_mcp.add_tool(run_subagent, name="subagent", description=tool_desc)
+            subagent_mcp.add_tool(subagent_run, name="subagent_run", description=tool_desc)
 
             if args.agent_mcp_transport == "stdio":
                 print(f"\033[92m[+] Subagent MCP server '{server_name}' ready (stdio).\033[0m", file=sys.stderr)
@@ -2009,6 +2043,11 @@ async def async_main():
                 len(discover_all_skills())
                 if getattr(args, 'agent_use_skills', False) else None
             )
+            # When the todo MCP server is attached, give the UI an async callback
+            # to fetch the live plan over MCP (resources/read todo://current), so
+            # the side-panel checklist stays in sync without the UI knowing where
+            # the data is stored.
+            todo_provider = fetch_todo if todo_session is not None else None
             # Run the UI driver
             await ui_driver.run(
                 run_single_turn=run_single_turn,
@@ -2025,6 +2064,7 @@ async def async_main():
                 skills_count=skills_count,
                 reset_session=reset_session,
                 join_tool_processing=args.join_tool_processing,
+                todo_provider=todo_provider,
             )
 
 def main():
