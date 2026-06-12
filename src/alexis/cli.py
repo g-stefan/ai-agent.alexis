@@ -179,6 +179,51 @@ def discover_all_skills() -> List[Tuple[str, str, str]]:
     return skills
 
 
+# A skill may declare `requires: <capability>` in its frontmatter to *link*
+# itself to an agent capability: it is only surfaced when that capability is
+# enabled, so the model is never told about a tool it doesn't actually have
+# (e.g. the `subagent` skill under --no-agent-internal-mcp-subagent, or `todo`
+# when the todo MCP server is off). Recognised tokens:
+#   internal-mcp-subagent  -> --agent-internal-mcp-subagent
+#   mcp-<name>             -> --agent-use-mcp-<name>
+#   skills                 -> --agent-use-skills
+def skill_required_capability(skill_md_path: str) -> Optional[str]:
+    """Return the ``requires`` capability token from a SKILL.md, or None."""
+    try:
+        with open(skill_md_path, "r", encoding="utf-8") as f:
+            fm = parse_skill_frontmatter(f.read())
+    except Exception:
+        return None
+    req = fm.get("requires")
+    return str(req).strip() if req else None
+
+
+def skill_capability_enabled(requires: str, args) -> bool:
+    """Whether the capability a linked skill requires is currently on. Unknown
+    tokens fail open (the skill is kept)."""
+    token = (requires or "").strip().lower()
+    if token in ("internal-mcp-subagent", "subagent"):
+        return bool(getattr(args, "agent_internal_mcp_subagent", False))
+    if token.startswith("mcp-"):
+        name = token[len("mcp-"):].replace("-", "_")
+        return bool(getattr(args, f"agent_use_mcp_{name}", False))
+    if token == "skills":
+        return bool(getattr(args, "agent_use_skills", False))
+    return True
+
+
+def filter_skills_for_args(skills: List[Tuple[str, str, str]], args) -> List[Tuple[str, str, str]]:
+    """Drop linked skills whose required capability is disabled, so they vanish
+    from both the system prompt and the UI count when their feature is off."""
+    kept: List[Tuple[str, str, str]] = []
+    for entry in skills:
+        req = skill_required_capability(entry[2])
+        if req and not skill_capability_enabled(req, args):
+            continue
+        kept.append(entry)
+    return kept
+
+
 def build_skills_prompt(skills: List[Tuple[str, str, str]]) -> str:
     """Render the discovered skills as a system-prompt section. Follows the
     progressive-disclosure model: only names + descriptions are shown; the
@@ -1635,7 +1680,10 @@ async def async_main():
             # a later one of the same name — matching the skills MCP server's
             # resolution order.
             searched_dirs = [os.path.join(r, "skills") for r in agent_skill_roots()]
-            skills = discover_all_skills()
+            # Drop linked skills whose capability is disabled (e.g. `subagent`
+            # under --no-agent-internal-mcp-subagent) so the model isn't told
+            # about a tool it doesn't have.
+            skills = filter_skills_for_args(discover_all_skills(), args)
             if skills:
                 system_parts.append(build_skills_prompt(skills))
                 print(f"\033[94m[*] Loaded {len(skills)} skill(s) from {', '.join(searched_dirs)}\033[0m", file=sys.stderr)
@@ -2040,7 +2088,7 @@ async def async_main():
             # Skills count for the UI panel: None when skills are disabled (panel
             # hidden), otherwise the number discovered across all agent roots.
             skills_count = (
-                len(discover_all_skills())
+                len(filter_skills_for_args(discover_all_skills(), args))
                 if getattr(args, 'agent_use_skills', False) else None
             )
             # When the todo MCP server is attached, give the UI an async callback

@@ -1,5 +1,6 @@
 ---
 name: todo
+requires: mcp-todo
 description: Track multi-step work with a persistent project todo list — a plan description plus checkable items (pending / in_progress / completed) stored in .agents/repository/todo.sqlite. Use it whenever a task has several steps, when you want progress shown live in the UI side panel, or to resume work after the agent was closed. Backed by the bundled todo MCP server (todo_* tools).
 ---
 
