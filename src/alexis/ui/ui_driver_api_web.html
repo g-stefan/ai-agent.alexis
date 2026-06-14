@@ -137,7 +137,7 @@
 <body class="h-full flex flex-col selection:bg-green-900 selection:text-white text-sm sm:text-base">
 
     <header class="border-b border-green-900 p-3 flex flex-row justify-between items-center bg-black z-10 gap-3">
-        <div id="app-title" class="text-green-500 font-bold">AI-Agent.Alexis</div>
+        <div id="app-title" class="text-green-500 font-bold">Alexis</div>
 
         <div class="flex items-center gap-3 text-xs sm:text-sm">
             <div id="proc-loader" class="proc-loader" title="Idle"></div>
@@ -157,6 +157,21 @@
         <div id="toast" class="absolute top-4 left-1/2 transform -translate-x-1/2 border px-4 py-2 hidden z-50 transition-opacity duration-300 opacity-0 bg-black shadow-lg shadow-black" role="alert">
             <span id="toast-prefix" class="font-bold mr-2"></span>
             <span id="toast-message" class="text-gray-300"></span>
+        </div>
+
+        <!-- Themed confirmation modal (replaces native confirm()) -->
+        <div id="confirm-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-black/80 p-4" role="dialog" aria-modal="true">
+            <div class="w-full max-w-md border border-green-700 bg-black shadow-lg shadow-green-900/40">
+                <div class="border-b border-green-900 px-4 py-2 flex items-center justify-between">
+                    <span id="confirm-title" class="font-bold text-green-400">[CONFIRM]</span>
+                    <button id="confirm-x" class="text-green-700 hover:text-green-300 transition-colors" title="Cancel">[X]</button>
+                </div>
+                <div id="confirm-message" class="px-4 py-4 text-gray-300 whitespace-pre-line leading-relaxed"></div>
+                <div class="border-t border-green-900 px-4 py-3 flex justify-end gap-2 text-xs sm:text-sm">
+                    <button id="confirm-cancel" class="text-green-600 hover:bg-green-900 hover:text-white px-3 py-1 border border-green-900 transition-colors">[CANCEL]</button>
+                    <button id="confirm-ok" class="text-red-500 hover:bg-red-900 hover:text-white px-3 py-1 border border-red-900 transition-colors">[CONFIRM]</button>
+                </div>
+            </div>
         </div>
 
         <!-- Chat Output Logs -->
@@ -222,6 +237,12 @@
             const toast = document.getElementById('toast');
             const toastPrefix = document.getElementById('toast-prefix');
             const toastMessage = document.getElementById('toast-message');
+            const confirmOverlay = document.getElementById('confirm-overlay');
+            const confirmTitle = document.getElementById('confirm-title');
+            const confirmMessage = document.getElementById('confirm-message');
+            const confirmOk = document.getElementById('confirm-ok');
+            const confirmCancel = document.getElementById('confirm-cancel');
+            const confirmX = document.getElementById('confirm-x');
 
             let selectedImages = [];
             let selectedFiles = [];
@@ -270,6 +291,36 @@
                     setTimeout(() => toast.classList.add('hidden'), 300);
                 }, 4000);
             };
+
+            // In-page themed confirmation dialog. Returns a Promise<boolean>
+            // that resolves true on confirm, false on cancel/escape/backdrop.
+            let confirmResolver = null;
+            const closeConfirm = (result) => {
+                confirmOverlay.classList.add('hidden');
+                confirmOverlay.classList.remove('flex');
+                const resolve = confirmResolver;
+                confirmResolver = null;
+                if (resolve) resolve(result);
+            };
+            const showConfirm = ({ title = '[CONFIRM]', message = '', confirmLabel = '[CONFIRM]', cancelLabel = '[CANCEL]' } = {}) => {
+                confirmTitle.textContent = title;
+                confirmMessage.textContent = message;
+                confirmOk.textContent = confirmLabel;
+                confirmCancel.textContent = cancelLabel;
+                confirmOverlay.classList.remove('hidden');
+                confirmOverlay.classList.add('flex');
+                confirmOk.focus();
+                return new Promise((resolve) => { confirmResolver = resolve; });
+            };
+            confirmOk.addEventListener('click', () => closeConfirm(true));
+            confirmCancel.addEventListener('click', () => closeConfirm(false));
+            confirmX.addEventListener('click', () => closeConfirm(false));
+            confirmOverlay.addEventListener('click', (e) => { if (e.target === confirmOverlay) closeConfirm(false); });
+            document.addEventListener('keydown', (e) => {
+                if (!confirmResolver) return;
+                if (e.key === 'Escape') { e.preventDefault(); closeConfirm(false); }
+                else if (e.key === 'Enter') { e.preventDefault(); closeConfirm(true); }
+            });
 
             const scrollToBottom = () => {
                 chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -367,6 +418,21 @@
                     el.classList.remove('text-yellow-600');
                     el.classList.add('text-yellow-400');
                 }
+            };
+
+            // Terminal-style greeting shown on an empty log (fresh load with no
+            // server history, or right after a clear/reset).
+            const renderGreeting = () => {
+                chatContainer.innerHTML = '';
+                const wrapper = document.createElement('div');
+                wrapper.className = 'w-full animate-fade-in mt-2';
+                wrapper.innerHTML = `
+                    <div class="msg-header"><span class="text-cyan-500 font-bold">System</span></div>
+                    <div class="pl-4 mt-2 border-l-2 border-cyan-900 text-gray-400">
+                        <div>Session ready. Enter a command or prompt to begin.</div>
+                    </div>
+                `;
+                chatContainer.appendChild(wrapper);
             };
 
             const renderUserMessage = (text, imagesBase64 = [], files = []) => {
@@ -680,7 +746,7 @@
                     const response = await fetch(`${getBaseUrl()}/version`, { method: 'GET', mode: 'cors' });
                     if (!response.ok) return;
                     const data = await response.json();
-                    const title = data.title || `${data.name || 'AI-Agent.Alexis'} v${data.version || '0.0.0'}`;
+                    const title = data.title || `${data.name || 'Alexis'} v${data.version || '0.0.0'}`;
                     appTitle.textContent = title;
                     document.title = title;
                 } catch (error) {
@@ -715,39 +781,38 @@
             };
 
             clearBtn.addEventListener('click', async () => {
-                if(confirm("Execute clear_history.sh?")) {
-                    try {
-                        const response = await fetch(`${getBaseUrl()}/clear`, { method: 'POST', mode: 'cors' });
-                        if (response.ok) {
-                            chatContainer.innerHTML = '';
-                            showToast("History purged.", false);
-                        } else {
-                            throw new Error('Server error');
-                        }
-                    } catch (error) {
-                        showToast("Failed to purge server logs.");
-                        chatContainer.innerHTML = '';
-                        renderGreeting();
-                    }
+                const ok = await showConfirm({
+                    title: '[CLEAR_LOG]',
+                    message: 'Clear the conversation history?\n\nThis removes every message from the chat log for this folder. The todo plan is kept.',
+                    confirmLabel: '[CLEAR]'
+                });
+                if (!ok) return;
+                try {
+                    const response = await fetch(`${getBaseUrl()}/clear`, { method: 'POST', mode: 'cors' });
+                    if (!response.ok) throw new Error('Server error');
+                    renderGreeting();
+                    showToast("History cleared.", false);
+                } catch (error) {
+                    showToast("Failed to clear history.");
                 }
             });
 
             // Full session reset: wipes this folder's history AND todo plan so a
             // failed run can be retried clean.
             if (resetBtn) resetBtn.addEventListener('click', async () => {
-                if(confirm("Reset session? This wipes the conversation history AND the todo plan for this folder.")) {
-                    try {
-                        const response = await fetch(`${getBaseUrl()}/session/reset`, { method: 'POST', mode: 'cors' });
-                        if (response.ok) {
-                            chatContainer.innerHTML = '';
-                            renderGreeting();
-                            showToast("Session reset — history and todo cleared.", false);
-                        } else {
-                            throw new Error('Server error');
-                        }
-                    } catch (error) {
-                        showToast("Failed to reset session.");
-                    }
+                const ok = await showConfirm({
+                    title: '[RESET_SESSION]',
+                    message: 'Reset the session?\n\nThis wipes the conversation history AND the todo plan for this folder so a failed run can be retried clean.',
+                    confirmLabel: '[RESET]'
+                });
+                if (!ok) return;
+                try {
+                    const response = await fetch(`${getBaseUrl()}/session/reset`, { method: 'POST', mode: 'cors' });
+                    if (!response.ok) throw new Error('Server error');
+                    renderGreeting();
+                    showToast("Session reset — history and todo cleared.", false);
+                } catch (error) {
+                    showToast("Failed to reset session.");
                 }
             });
 

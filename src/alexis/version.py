@@ -12,7 +12,7 @@ import json
 import os
 import importlib.resources
 
-APP_NAME = "AI-Agent.Alexis"
+APP_NAME = "Alexis"
 APP_KEY = "ai-agent.alexis"
 
 

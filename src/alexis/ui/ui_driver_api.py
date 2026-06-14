@@ -279,7 +279,7 @@ class APIUIDriver(UIDriver):
                     "title": alexis_version.get_title(),
                 })
             except Exception as e:
-                return web.json_response({"name": "AI-Agent.Alexis", "version": "0.0.0", "title": "AI-Agent.Alexis", "error": str(e)})
+                return web.json_response({"name": "Alexis", "version": "0.0.0", "title": "Alexis", "error": str(e)})
 
         async def api_capabilities(request):
             """GET /capabilities - Report the LLM server's supported modalities.
