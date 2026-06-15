@@ -10,6 +10,7 @@ the absolute (case-normalised) directory path. A session owns:
   - ``index.sqlite``           — a registry of all sessions (id, cwd, timestamps)
   - ``<id>.history.sqlite``    — the conversation messages (owned by the CLI)
   - ``<id>.todo.sqlite``       — the todo plan (owned by the todo MCP server)
+  - ``<id>.provider.json``     — the LLM provider chosen for this folder (UI)
 
 Re-running Alexis in a directory resumes that directory's session; a reset wipes
 its history and todo for a clean retry. This module is pure stdlib and never
@@ -56,6 +57,43 @@ def todo_db_path(alexis_home: str, sid: str) -> str:
 
 def index_db_path(alexis_home: str) -> str:
     return os.path.join(sessions_dir(alexis_home), "index.sqlite")
+
+
+def provider_path(alexis_home: str, sid: str) -> str:
+    """Path of the per-session LLM provider file (``<id>.provider.json``).
+    Holds the provider name the user selected for this folder in the UI, so the
+    choice is remembered across runs. Pruned alongside the session's other files
+    by :func:`prune_sessions` (it matches ``<id>.*``)."""
+    return os.path.join(sessions_dir(alexis_home), f"{sid}.provider.json")
+
+
+# ── Per-session provider choice (<id>.provider.json) ─────────────────────
+
+def provider_load(alexis_home: str, sid: str) -> Optional[str]:
+    """Return the provider name remembered for this session, or None when none
+    is stored / the file is unreadable."""
+    path = provider_path(alexis_home, sid)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        name = data.get("provider") if isinstance(data, dict) else None
+        return str(name) if name else None
+    except Exception:
+        return None
+
+
+def provider_save(alexis_home: str, sid: str, name: str) -> None:
+    """Remember ``name`` as this session's provider. Best-effort: errors are
+    swallowed like the rest of the session persistence."""
+    try:
+        path = provider_path(alexis_home, sid)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"provider": name}, f)
+    except Exception:
+        pass
 
 
 # ── Shared sqlite helper ─────────────────────────────────────────────────

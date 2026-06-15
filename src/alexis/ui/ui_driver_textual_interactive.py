@@ -1058,6 +1058,9 @@ if TEXTUAL_AVAILABLE:
             with Horizontal(id="input-bar"):
                 yield StopButton(id="stop-btn")
                 yield ResetButton(id="reset-btn")
+                # Shows the active LLM provider; the app fills it in on mount and
+                # whenever the provider is switched (Menu -> LLM Provider).
+                yield Static("", id="provider-label")
                 yield Static("Enter: send   Ctrl+J: new line   /help: commands",
                              id="input-hint")
 
@@ -1145,16 +1148,52 @@ if TEXTUAL_AVAILABLE:
             yield DialogClose(classes="dialog-close")
 
     class DialogScreen(ModalScreen):
-        """Base modal: dims the background, closes on Esc or the ✕ button."""
+        """Base modal: dims the background, closes on Esc or the ✕ button.
 
-        BINDINGS = [Binding("escape", "close_dialog", "Close")]
+        Up/Down move focus between the dialog's controls (buttons / inputs) so
+        every dialog is keyboard-navigable; Enter activates the focused button.
+        These arrow bindings are safe across all dialogs — neither a Button nor a
+        single-line Input uses Up/Down, so they only ever shift focus here."""
+
+        BINDINGS = [
+            Binding("escape", "close_dialog", "Close"),
+            Binding("up", "dialog_focus_previous", "Previous", show=False),
+            Binding("down", "dialog_focus_next", "Next", show=False),
+        ]
 
         def action_close_dialog(self) -> None:
             self.dismiss(None)
 
+        def action_dialog_focus_previous(self) -> None:
+            self.focus_previous()
+
+        def action_dialog_focus_next(self) -> None:
+            self.focus_next()
+
         def on_dialog_close_pressed(self, message: "DialogClose.Pressed") -> None:
             message.stop()
             self.dismiss(None)
+
+    class ButtonMenuScreen(DialogScreen):
+        """A dialog whose body is a vertical list of option buttons, made fully
+        keyboard-driven: Up/Down move the highlight (via DialogScreen), Enter or
+        Space activates the focused option, and the first option is focused on
+        open. Space is added here rather than on the base so it never shadows
+        typing a space into the input dialogs (Load / Add file)."""
+
+        BINDINGS = [Binding("space", "press_focused", "Select", show=False)]
+
+        def on_mount(self) -> None:
+            # Focus the first option so arrow keys / Enter / Space work at once.
+            try:
+                self.query(Button).first().focus()
+            except Exception:
+                pass
+
+        def action_press_focused(self) -> None:
+            foc = self.focused
+            if isinstance(foc, Button):
+                foc.press()
 
     class CommandsPalette(CommandPalette):
         """The built-in command palette, dressed to match the menu dialog:
@@ -1179,14 +1218,22 @@ if TEXTUAL_AVAILABLE:
             message.stop()
             self.dismiss()
 
-    class MenuScreen(DialogScreen):
+    class MenuScreen(ButtonMenuScreen):
         """Modal menu opened from the top bar."""
+
+        def __init__(self, show_provider: bool = False, **kwargs):
+            super().__init__(**kwargs)
+            # The LLM Provider entry is only offered when providers are
+            # configured (the backend passes a provider_info callback).
+            self._show_provider = show_provider
 
         def compose(self) -> ComposeResult:
             with Vertical(classes="themed-dialog"):
                 yield DialogTitleBar("Menu", classes="dialog-title-bar")
                 with Vertical(classes="dialog-body"):
                     yield Button("Add file / image", id="m-addfile", classes="menu-option")
+                    if self._show_provider:
+                        yield Button("LLM Provider", id="m-provider", classes="menu-option")
                     yield Button("Load session", id="m-load", classes="menu-option")
                     yield Button("Save session", id="m-save", classes="menu-option")
                     yield Button("Help", id="m-help", classes="menu-option")
@@ -1194,6 +1241,53 @@ if TEXTUAL_AVAILABLE:
 
         def on_button_pressed(self, event: "Button.Pressed") -> None:
             self.dismiss(event.button.id)
+
+    class ProviderScreen(ButtonMenuScreen):
+        """Modal that lists the LLM providers defined in config.jsonc so the user
+        can switch the active one for this session. The config default is tagged
+        ``(default)`` and the currently-active provider ``(current)``. Dismisses
+        with the chosen provider name, or None on cancel."""
+
+        def __init__(self, providers: List[str], default_name: Optional[str],
+                     current_name: Optional[str], **kwargs):
+            super().__init__(**kwargs)
+            self._providers = providers
+            self._default = default_name
+            self._current = current_name
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="themed-dialog"):
+                yield DialogTitleBar("LLM Provider", classes="dialog-title-bar")
+                with Vertical(classes="dialog-body"):
+                    if not self._providers:
+                        yield Static("No providers defined in config.jsonc.",
+                                     classes="dialog-label")
+                        yield Button("Close", id="provider-close", classes="menu-option")
+                        return
+                    yield Static("Select the provider for this session:",
+                                 classes="dialog-label")
+                    with VerticalScroll(id="provider-list"):
+                        for i, name in enumerate(self._providers):
+                            tags = []
+                            if name == self._default:
+                                tags.append("(default)")
+                            if name == self._current:
+                                tags.append("(current)")
+                            suffix = ("  " + " ".join(tags)) if tags else ""
+                            # Index-based id: provider names aren't valid widget ids.
+                            yield Button(f"{name}{suffix}", id=f"provider-opt-{i}",
+                                         classes="menu-option")
+
+        def on_button_pressed(self, event: "Button.Pressed") -> None:
+            bid = event.button.id or ""
+            if bid.startswith("provider-opt-"):
+                try:
+                    idx = int(bid[len("provider-opt-"):])
+                    self.dismiss(self._providers[idx])
+                    return
+                except (ValueError, IndexError):
+                    pass
+            self.dismiss(None)
 
     class HelpScreen(DialogScreen):
         """Modal describing the available controls."""
@@ -1205,12 +1299,15 @@ if TEXTUAL_AVAILABLE:
             "  ⌘ Command    Open the command palette\n"
             "  ✕            Exit the agent\n\n"
             "[bold]Menu[/bold]\n"
+            "  LLM Provider   Switch the LLM provider for this session\n"
             "  Load session   Load a saved conversation from a JSON file\n"
             "  Save session   Write the current conversation to disk\n"
             "  Help           Show this screen\n"
             "  Exit           Quit the agent\n\n"
             "[bold]Keyboard[/bold]\n"
             "  Enter          Send your message\n"
+            "  ↑ / ↓          Move between options in a dialog/menu\n"
+            "  Enter / Space  Select the highlighted menu option\n"
             "  Ctrl+J         New line in the input box\n"
             "  Shift+Enter    New line (terminals with enhanced keys)\n"
             "  Ctrl+L         Clear the conversation\n"
@@ -1224,6 +1321,7 @@ if TEXTUAL_AVAILABLE:
             "  /clear         Clear the conversation\n"
             "  /save          Save the current session\n"
             "  /load [path]   Load a session\n"
+            "  /provider [n]  Switch the LLM provider (no arg opens a picker)\n"
             "  /help          List all slash commands\n\n"
             "[dim]The right side panel shows live token stats and, when the "
             "todo system is active, the plan's progress (done/total) — click it "
@@ -1555,6 +1653,16 @@ if TEXTUAL_AVAILABLE:
             background: #806020;
             color: white;
         }
+        /* Active LLM provider, shown right after the Reset button. */
+        #provider-label {
+            width: auto;
+            height: 1;
+            background: #1a1a2e;
+            color: #60a0c0;
+            text-style: bold;
+            padding: 0 1;
+            margin-left: 1;
+        }
         #input-hint {
             width: 1fr;
             height: 1;
@@ -1672,9 +1780,15 @@ if TEXTUAL_AVAILABLE:
            name on the left and a ✕ close button on the right, then a padded
            body. Colours come from the same palette as the rest of the UI
            (#1a1a2e panels, #2a2a50 highlights, #4040a0 / #8080ff accents). */
-        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen, ConfirmResetScreen {
+        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen, ConfirmResetScreen, ProviderScreen {
             align: center middle;
             background: black 55%;
+        }
+        /* Provider picker: a scrollable list when many providers are defined. */
+        #provider-list {
+            height: auto;
+            max-height: 18;
+            scrollbar-size-vertical: 1;
         }
         /* Read-only todo plan modal. */
         #todo-dialog { width: 68; }
@@ -1816,9 +1930,16 @@ if TEXTUAL_AVAILABLE:
                      save_state=None, session_path=None, thinking_enabled=False,
                      mcp_servers=None, skills_count=None, reset_session=None,
                      join_tool_processing=True, todo_provider=None,
-                     session_reset=None):
+                     session_reset=None, provider_info=None, set_provider=None):
             super().__init__()
             self.context_limit = context_limit
+            # Provider switching (Menu -> LLM Provider). `provider_info` is a
+            # zero-arg callable returning {providers, default, current} or None
+            # when no providers are configured; `set_provider` switches the
+            # active provider and returns {name, model, context_limit}.
+            self.provider_info = provider_info
+            self.set_provider_cb = set_provider
+            self.current_provider: Optional[str] = None
             # Async callable that fetches the current todo plan over MCP, or None
             # when the todo server isn't attached — drives whether the TODO side
             # panel shows and how it gets its data.
@@ -1878,6 +1999,23 @@ if TEXTUAL_AVAILABLE:
             })
             # Match the sidebar to the current terminal width right away.
             self._update_stats_visibility(self.size.width)
+            # Seed the provider label from the backend's current provider.
+            if self.provider_info:
+                try:
+                    info = self.provider_info()
+                    if info:
+                        self.current_provider = info.get("current")
+                except Exception:
+                    pass
+            self._update_provider_label(self.current_provider)
+
+        def _update_provider_label(self, name: Optional[str]) -> None:
+            """Set the 'provider: <name>' text shown next to the Reset button."""
+            try:
+                label = self.query_one("#provider-label", Static)
+            except Exception:
+                return
+            label.update(f"provider: {name}" if name else "provider: —")
 
         def on_resize(self, event: events.Resize) -> None:
             """Show/hide the stats sidebar as the terminal is resized."""
@@ -1946,8 +2084,17 @@ if TEXTUAL_AVAILABLE:
                                   self.push_screen(LoadScreen(self.session_path or ""),
                                                    self._on_load_result)),
                      "Load a session (optionally pass a path)")
+            register(["provider"], lambda arg: self._provider_command(arg),
+                     "Switch the LLM provider for this session (optionally pass a name)")
             register(["help", "?", "commands"], lambda arg: self._show_commands_help(),
                      "Show available slash commands")
+
+        def _provider_command(self, arg: str) -> None:
+            """/provider — open the picker; /provider <name> — switch directly."""
+            if arg:
+                self._on_provider_result(arg)
+            else:
+                self._open_provider_dialog()
 
         def _show_commands_help(self) -> None:
             """Notify with the list of registered slash commands."""
@@ -1993,7 +2140,8 @@ if TEXTUAL_AVAILABLE:
             elif message.action == "command":
                 self.action_command_palette()
             elif message.action == "menu":
-                self.push_screen(MenuScreen(), self._on_menu_result)
+                self.push_screen(MenuScreen(show_provider=bool(self.provider_info)),
+                                 self._on_menu_result)
 
         def _on_menu_result(self, result: Optional[str]) -> None:
             if result == "m-exit":
@@ -2006,6 +2154,59 @@ if TEXTUAL_AVAILABLE:
                 self.push_screen(LoadScreen(self.session_path or ""), self._on_load_result)
             elif result == "m-addfile":
                 self.push_screen(AddFileScreen(), self._on_addfile_result)
+            elif result == "m-provider":
+                self._open_provider_dialog()
+
+        # ── LLM provider switching ───────────────────────────────
+        def _open_provider_dialog(self) -> None:
+            """Open the provider picker (Menu -> LLM Provider)."""
+            if not self.provider_info:
+                self.notify("No providers configured in config.jsonc.",
+                            severity="warning", timeout=3)
+                return
+            try:
+                info = self.provider_info()
+            except Exception as e:
+                self.notify(f"Cannot read providers: {e}", severity="error", timeout=4)
+                return
+            if not info or not info.get("providers"):
+                self.notify("No providers configured in config.jsonc.",
+                            severity="warning", timeout=3)
+                return
+            self.current_provider = info.get("current")
+            self.push_screen(
+                ProviderScreen(info.get("providers") or [], info.get("default"),
+                               info.get("current")),
+                self._on_provider_result,
+            )
+
+        def _on_provider_result(self, name: Optional[str]) -> None:
+            """Apply the provider chosen in the dialog (or via /provider <name>)."""
+            if not name:
+                return
+            if name == self.current_provider:
+                self.notify(f"Already using provider '{name}'.", timeout=2)
+                return
+            if not self.set_provider_cb:
+                return
+            try:
+                result = self.set_provider_cb(name)
+            except Exception as e:
+                self.notify(f"Switch failed: {e}", severity="error", timeout=4)
+                return
+            self.current_provider = (result or {}).get("name", name)
+            self._update_provider_label(self.current_provider)
+            # Reflect the new provider's context window in the stats panel.
+            ctx = (result or {}).get("context_limit")
+            self.context_limit = ctx
+            self.update_stats({"context_limit": ctx})
+            model = (result or {}).get("model")
+            note = f"Provider → {self.current_provider}"
+            if model:
+                note += f" (model: {model})"
+            if self._is_processing():
+                note += " — applies to the next turn"
+            self.notify(note, severity="information", timeout=3)
 
         def _on_addfile_result(self, path: Optional[str]) -> None:
             if path:
@@ -2546,6 +2747,8 @@ class TextualInteractiveUIDriver(UIDriver):
                 join_tool_processing=kwargs.get("join_tool_processing", True),
                 todo_provider=kwargs.get("todo_provider"),
                 session_reset=kwargs.get("session_reset"),
+                provider_info=kwargs.get("provider_info"),
+                set_provider=kwargs.get("set_provider"),
             )
             await app.run_async()
             save_state()

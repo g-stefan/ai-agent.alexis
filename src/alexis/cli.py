@@ -1238,36 +1238,68 @@ async def async_main():
     # its driver/url/api-key/model as defaults. Explicit CLI flags always win;
     # below them comes the provider, then the built-in defaults / API_KEY env var.
     DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
+    # Fallback context window used only for the usage-percentage display when no
+    # context-limit is known (neither --context-limit nor the selected provider's
+    # context-limit). Overridden by either of those; per-provider context-limit
+    # in config.jsonc is the right place to set an accurate window. 64K is a safe
+    # floor that essentially all newer models support.
+    DEFAULT_CONTEXT_LIMIT = 65536
     try:
         _config = alexis_config.load_config(alexis_home())
     except ValueError as e:
         print(f"\033[91m[!] {e}\033[0m", file=sys.stderr)
         sys.exit(1)
+    # Which connection settings the user set explicitly on the CLI, captured
+    # BEFORE any provider / built-in default fills them in. An explicit flag
+    # always wins over a provider's value (startup precedence); the per-session
+    # provider restore below relies on this too.
+    _explicit_conn = {
+        "llm_driver": args.llm_driver is not None,
+        "url": args.url is not None,
+        "api_key": args.api_key is not None,
+        "model": args.model is not None,
+        "context_limit": args.context_limit is not None,
+    }
+
+    def _provider_apply_to_args(pname, pparams, respect_explicit):
+        """Apply a resolved provider's connection settings (driver/url/api-key/
+        model/context-limit) onto ``args``. When ``respect_explicit`` is True a
+        value the user set with a CLI flag is kept (flag > provider); when False
+        — an explicit runtime choice in the UI — the provider's values replace
+        ``args`` unconditionally. Raises ValueError on a bad driver/context-limit."""
+        if pparams.get("driver"):
+            _pd = pparams["driver"]
+            if _pd not in get_llm_drivers():
+                raise ValueError(f"provider '{pname}' uses unknown driver '{_pd}'. Available: {', '.join(get_llm_drivers())}")
+            if not (respect_explicit and _explicit_conn["llm_driver"]):
+                args.llm_driver = _pd
+        if pparams.get("url") and not (respect_explicit and _explicit_conn["url"]):
+            args.url = pparams["url"]
+        if pparams.get("api_key") is not None and not (respect_explicit and _explicit_conn["api_key"]):
+            args.api_key = pparams["api_key"]
+        if pparams.get("model") and not (respect_explicit and _explicit_conn["model"]):
+            args.model = pparams["model"]
+        if pparams.get("context_limit") is not None and not (respect_explicit and _explicit_conn["context_limit"]):
+            try:
+                args.context_limit = int(pparams["context_limit"])
+            except (TypeError, ValueError):
+                raise ValueError(f"provider '{pname}' has invalid context-limit {pparams['context_limit']!r} (expected an integer).")
+
     try:
         _provider_name, _provider = alexis_config.resolve_provider(_config, args.provider)
     except ValueError as e:
         print(f"\033[91m[!] {e}\033[0m", file=sys.stderr)
         sys.exit(1)
     if _provider_name:
-        if args.llm_driver is None and _provider.get("driver"):
-            _pd = _provider["driver"]
-            if _pd not in get_llm_drivers():
-                print(f"\033[91m[!] Provider '{_provider_name}' uses unknown driver '{_pd}'. Available: {', '.join(get_llm_drivers())}\033[0m", file=sys.stderr)
-                sys.exit(1)
-            args.llm_driver = _pd
-        if args.url is None and _provider.get("url"):
-            args.url = _provider["url"]
-        if args.api_key is None and _provider.get("api_key") is not None:
-            args.api_key = _provider["api_key"]
-        if args.model is None and _provider.get("model"):
-            args.model = _provider["model"]
-        if args.context_limit is None and _provider.get("context_limit") is not None:
-            try:
-                args.context_limit = int(_provider["context_limit"])
-            except (TypeError, ValueError):
-                print(f"\033[91m[!] Provider '{_provider_name}' has invalid context-limit {_provider['context_limit']!r} (expected an integer).\033[0m", file=sys.stderr)
-                sys.exit(1)
+        try:
+            _provider_apply_to_args(_provider_name, _provider, respect_explicit=True)
+        except ValueError as e:
+            print(f"\033[91m[!] Provider '{_provider_name}': {e}\033[0m", file=sys.stderr)
+            sys.exit(1)
         print(f"\033[94m[*] Provider '{_provider_name}' (from {alexis_config.config_path(alexis_home())})\033[0m", file=sys.stderr)
+    # The provider active right now (drives the UI's provider label/menu and the
+    # per-session persistence). Updated when the user switches it at runtime.
+    _current_provider_name = _provider_name
     # Fill any still-unset connection settings from the built-in defaults.
     if args.llm_driver is None:
         args.llm_driver = "llama"
@@ -1277,6 +1309,11 @@ async def async_main():
         args.model = "default"
     if args.api_key is None:
         args.api_key = os.environ.get("API_KEY")
+    # Still no context window (provider didn't declare one and no --context-limit):
+    # fall back to a sane default so the usage gauge has something to show. A
+    # per-session provider restored below may still override this.
+    if args.context_limit is None:
+        args.context_limit = DEFAULT_CONTEXT_LIMIT
 
     # Resolve the agent capability flags + UI driver, in precedence order:
     #   explicit CLI flag  >  config [agent] section  >  built-in default.
@@ -1406,6 +1443,22 @@ async def async_main():
                 _pruned = session_store.prune_sessions(_home, args.sessions_prune_days, keep_id=session_id)
                 if _pruned:
                     print(f"\033[94m[*] Pruned {len(_pruned)} stale session(s) from ~/.alexis/sessions.\033[0m", file=sys.stderr)
+
+    # Restore the per-session LLM provider choice. The textual UI lets the user
+    # switch providers per folder (Menu -> LLM Provider); the pick is remembered
+    # in ~/.alexis/sessions/<id>.provider.json and re-applied on resume here,
+    # before the subagent forwarding / driver creation read these settings. An
+    # explicit --provider on the CLI overrides the remembered one.
+    if session_id and not args.provider:
+        _saved_provider = session_store.provider_load(alexis_home(), session_id)
+        if _saved_provider and _saved_provider in (_config.get("providers") or {}):
+            try:
+                _sp_name, _sp_params = alexis_config.resolve_provider(_config, _saved_provider)
+                _provider_apply_to_args(_sp_name, _sp_params, respect_explicit=True)
+                _current_provider_name = _sp_name
+                print(f"\033[94m[*] Restored session provider '{_sp_name}'.\033[0m", file=sys.stderr)
+            except ValueError as e:
+                print(f"\033[93m[!] Could not restore session provider '{_saved_provider}': {e}\033[0m", file=sys.stderr)
 
     # Bundled MCP servers: for each enabled --agent-use-mcp-<name>, attach
     # mcp/mcp-server-<name>.py (stdio) and apply its env defaults. The subagent
@@ -1908,6 +1961,57 @@ async def async_main():
                     return json.loads(text)
             return None
 
+        def get_provider_info():
+            """Provider menu data for the UI: every provider defined in
+            config.jsonc, which one is the config default, and which is active
+            now. Returns None when no providers are configured (the menu entry is
+            then hidden)."""
+            _names = sorted((_config.get("providers") or {}).keys())
+            if not _names:
+                return None
+            return {
+                "providers": _names,
+                "default": _config.get("default-provider") or _config.get("default_provider"),
+                "current": _current_provider_name,
+            }
+
+        def set_provider(name):
+            """Switch the active LLM provider at runtime (textual UI). Rebuilds the
+            driver from the provider's settings, updates the connection/generation
+            args used by the next turn, remembers the choice for this session, and
+            returns ``{'name','model','context_limit'}``. Raises ValueError for an
+            unknown provider. An in-flight turn keeps its own driver; the switch
+            takes effect from the next turn."""
+            nonlocal llm_driver, _current_provider_name
+            pname, pparams = alexis_config.resolve_provider(_config, name)
+            # An explicit UI choice fully replaces the connection settings.
+            _provider_apply_to_args(pname, pparams, respect_explicit=False)
+            # The provider's api-key wins (env fallback), so a key from the
+            # previously-selected provider never leaks into the new one.
+            args.api_key = pparams.get("api_key")
+            if args.api_key is None:
+                args.api_key = os.environ.get("API_KEY")
+            # The context window must track the new provider: when it declares no
+            # context-limit, fall back to the default rather than keeping the
+            # previous provider's window.
+            if pparams.get("context_limit") is None:
+                args.context_limit = DEFAULT_CONTEXT_LIMIT
+            # Built-in fallbacks for anything the provider left unset.
+            if not args.llm_driver:
+                args.llm_driver = "llama"
+            if not args.url:
+                args.url = DEFAULT_URL
+            if not args.model:
+                args.model = "default"
+            if args.url.endswith("/completion"):
+                args.url = args.url.replace("/completion", "/v1/chat/completions")
+            llm_driver = create_llm_driver(args.llm_driver, args.url, args.api_key)
+            _current_provider_name = pname
+            if session_id:
+                session_store.provider_save(alexis_home(), session_id, pname)
+            print(f"\033[94m[*] Provider switched to '{pname}' ({args.llm_driver} @ {args.url}, model {args.model}).\033[0m", file=sys.stderr)
+            return {"name": pname, "model": args.model, "context_limit": args.context_limit}
+
         async def run_single_turn(queue=None, cancel_event=None):
             chat_coro = chat_loop(
                 driver=llm_driver,
@@ -2196,6 +2300,8 @@ async def async_main():
                 session_reset=(session_reset if history_path else None),
                 join_tool_processing=args.join_tool_processing,
                 todo_provider=todo_provider,
+                provider_info=get_provider_info,
+                set_provider=set_provider,
             )
 
 def main():
