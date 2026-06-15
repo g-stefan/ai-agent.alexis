@@ -154,10 +154,12 @@ class APIUIDriver(UIDriver):
             # parsing the inlined bodies. It maps each attachment to the index of
             # the content part it produced, and is stripped before the message is
             # sent to the model (see strip_ui_keys in alexis.py).
+            # Ordering contract: attachments (files + images) are emitted FIRST,
+            # and the user's text prompt is appended LAST. Multimodal models read
+            # an image/file better when the accompanying question follows it, so
+            # the prompt must always be the final content part of the turn.
             turn_content = []
             attachments = []
-            if prompt:
-                turn_content.append({"type": "text", "text": prompt})
 
             for f in files:
                 if not isinstance(f, dict):
@@ -216,6 +218,10 @@ class APIUIDriver(UIDriver):
                     turn_content.append({"type": "image_url", "image_url": image_url})
                 else:
                     turn_content.append({"type": "image_url", "image_url": {"url": img}})
+
+            # Prompt text goes last, after every file and image part.
+            if prompt:
+                turn_content.append({"type": "text", "text": prompt})
 
             if not turn_content:
                 return web.Response(status=400, text="Empty prompt, files, or images list")
