@@ -1,16 +1,12 @@
 ---
 name: todo
 requires: mcp-todo
-description: Track multi-step work with a persistent project todo list — a plan description plus checkable items (pending / in_progress / completed) stored in .agents/repository/todo.sqlite. Use it whenever a task has several steps, when you want progress shown live in the UI side panel, or to resume work after the agent was closed. Backed by the bundled todo MCP server (todo_* tools).
+description: Track multi-step work with a persistent project todo list — a plan description plus checkable items (pending / in_progress / completed). Use it whenever a task has several steps, when you want progress shown live in the UI side panel, or to resume work after the agent was closed. Backed by the bundled todo MCP server (todo_* tools).
 ---
 
 # Todo system
 
-You have a **persistent todo list** for the current project, provided by the
-bundled todo MCP server. It survives the agent being closed: the state lives in
-`.agents/repository/todo.sqlite` in the project folder, and the UI renders it
-live in the right-hand panel with checkboxes, so the user can watch progress and
-you can pick the work back up after a restart.
+You have a **persistent todo list** for the current project.
 
 A plan has two parts:
 
