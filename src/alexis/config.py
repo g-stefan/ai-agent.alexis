@@ -34,6 +34,7 @@ the flag and the config).
 import json
 import os
 import re
+import shutil
 from typing import Any, Dict, Optional, Tuple
 
 CONFIG_FILENAME = "config.jsonc"
@@ -165,3 +166,94 @@ def resolve_agent_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(agent, dict):
         raise ValueError("config 'agent' section must be an object")
     return agent
+
+
+def resolve_ui_settings(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the ``[ui]`` section: persistent UI preferences such as which
+    right-panel widgets are shown in detailed form. Keys are kebab-case, e.g.
+    ``detailed-statistics`` / ``detailed-context``. Returns ``{}`` when absent.
+
+    Raises ValueError if present but not a JSON object."""
+    ui = config.get("ui")
+    if ui is None:
+        ui = config.get("ui-settings") or config.get("ui_settings")
+    if ui is None:
+        return {}
+    if not isinstance(ui, dict):
+        raise ValueError("config 'ui' section must be an object")
+    return ui
+
+
+def _ui_section(config: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Return ``(key, section)`` for the existing ``[ui]`` object, trying the
+    accepted spellings. ``section`` is None when no such object exists yet (the
+    caller then creates one under the returned ``key``, defaulting to ``"ui"``)."""
+    for key in ("ui", "ui-settings", "ui_settings"):
+        sec = config.get(key)
+        if isinstance(sec, dict):
+            return key, sec
+    return "ui", None
+
+
+def set_ui_flag(config: Dict[str, Any], key: str, enabled: bool) -> None:
+    """Set ``ui.<key>`` to ``enabled`` in ``config`` (in place), creating the
+    ``[ui]`` section when absent. ``key`` is a config flag name such as
+    ``detailed-statistics`` or ``detailed-context``."""
+    sect_key, sec = _ui_section(config)
+    if sec is None:
+        sec = {}
+        config[sect_key] = sec
+    sec[key] = bool(enabled)
+
+
+def _agent_section(config: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Return ``(key, section)`` for the existing ``[agent]`` object, trying the
+    accepted spellings. ``section`` is None when no such object exists yet (the
+    caller then creates one under the returned ``key``, which defaults to
+    ``"agent"``)."""
+    for key in ("agent", "agent-defaults", "agent_defaults"):
+        sec = config.get(key)
+        if isinstance(sec, dict):
+            return key, sec
+    return "agent", None
+
+
+def set_agent_flag(config: Dict[str, Any], key: str, enabled: bool) -> None:
+    """Set ``agent.<key>`` to ``enabled`` in ``config`` (in place), creating the
+    ``[agent]`` section when absent. ``key`` is a config flag name such as
+    ``use-mcp-workspace`` or ``internal-mcp-subagent``."""
+    sect_key, sec = _agent_section(config)
+    if sec is None:
+        sec = {}
+        config[sect_key] = sec
+    sec[key] = bool(enabled)
+
+
+def set_mcp_server_enabled(config: Dict[str, Any], name: str, enabled: bool) -> None:
+    """Set ``agent.use-mcp-<name>`` to ``enabled`` in ``config`` (in place).
+    Mirrors the ``--agent-use-mcp-<name>`` / ``--no-...`` CLI flag, so the choice
+    is honoured on the next launch."""
+    set_agent_flag(config, f"use-mcp-{name}", enabled)
+
+
+def save_config(home_dir: str, config: Dict[str, Any]) -> str:
+    """Write ``config`` back to ``<home_dir>/config.jsonc`` as formatted JSON
+    (which is valid JSONC), and return the path written.
+
+    The previous file is first copied to ``config.jsonc.bak``. NOTE: JSONC
+    comments and original formatting in the existing file are NOT preserved — the
+    file is re-serialised from the parsed data — so the backup is the way to
+    recover any hand-written comments."""
+    path = config_path(home_dir)
+    os.makedirs(home_dir, exist_ok=True)
+    if os.path.isfile(path):
+        try:
+            shutil.copyfile(path, path + ".bak")
+        except OSError:
+            pass
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+    return path

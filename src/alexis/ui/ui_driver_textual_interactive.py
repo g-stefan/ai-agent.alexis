@@ -17,7 +17,7 @@ try:
     from textual import events
     from textual.message import Message
     from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-    from textual.widgets import Static, Button, TextArea, RichLog, Header, Footer, Label, Input
+    from textual.widgets import Static, Button, TextArea, RichLog, Header, Footer, Label, Input, Checkbox
     from textual.screen import ModalScreen
     from textual.binding import Binding
     from textual.command import CommandPalette, SearchIcon
@@ -329,6 +329,46 @@ if TEXTUAL_AVAILABLE:
             t.append(f"{'Used':5} ", style="bold")
             t.append(f"{used_pct:>9.1f}", style=gauge)
             t.append(" %", style="dim")
+            return t
+
+    class ContextBar(Static):
+        """Compact context-usage indicator shown when 'Detailed Context' is off:
+        a single horizontal bar with the used/limit token counts and the usage
+        percentage below it — a very short form of the ContextMap. The bar (and
+        percentage) turn yellow above 60% and red above 80%."""
+
+        FILLED = "█"
+        EMPTY = "░"
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.stats: Dict[str, Any] = {"context_limit": None, "total_tokens": 0}
+
+        def update_stats(self, stats: Dict[str, Any]) -> None:
+            self.stats.update(stats)
+            self.refresh()
+
+        @staticmethod
+        def _usage_color(pct: float) -> str:
+            return "#ff5f5f" if pct > 80 else "#ffd75f" if pct > 60 else "#5fff5f"
+
+        def render(self):
+            t = Text()
+            t.append("CONTEXT\n", style="bold cyan")
+            limit = self.stats.get("context_limit") or 0
+            if limit <= 0:
+                t.append("no window configured", style="dim")
+                return t
+            used = max(0, int(self.stats.get("total_tokens", 0) or 0))
+            pct = used / limit * 100 if limit else 0.0
+            color = self._usage_color(pct)
+            width = max(8, (self.size.width or 24) - 1)
+            filled = min(width, int(round(width * min(1.0, used / limit))))
+            t.append(self.FILLED * filled, style=color)
+            t.append(self.EMPTY * (width - filled), style=CONTEXT_FREE_COLOR)
+            t.append("\n")
+            t.append(f"{used:,} / {limit:,} ", style="#d0d0e0")
+            t.append(f"({pct:.1f}%)", style=color)
             return t
 
     # status -> (checkbox glyph, colour). Shared by the side panel and the modal.
@@ -1221,11 +1261,14 @@ if TEXTUAL_AVAILABLE:
     class MenuScreen(ButtonMenuScreen):
         """Modal menu opened from the top bar."""
 
-        def __init__(self, show_provider: bool = False, **kwargs):
+        def __init__(self, show_provider: bool = False, show_mcp: bool = False, **kwargs):
             super().__init__(**kwargs)
             # The LLM Provider entry is only offered when providers are
             # configured (the backend passes a provider_info callback).
             self._show_provider = show_provider
+            # The MCP Servers entry is only offered when MCP servers were
+            # discovered (the backend passes an mcp_info callback).
+            self._show_mcp = show_mcp
 
         def compose(self) -> ComposeResult:
             with Vertical(classes="themed-dialog"):
@@ -1234,6 +1277,9 @@ if TEXTUAL_AVAILABLE:
                     yield Button("Add file / image", id="m-addfile", classes="menu-option")
                     if self._show_provider:
                         yield Button("LLM Provider", id="m-provider", classes="menu-option")
+                    if self._show_mcp:
+                        yield Button("MCP Servers", id="m-mcp", classes="menu-option")
+                    yield Button("Settings", id="m-settings", classes="menu-option")
                     yield Button("Load session", id="m-load", classes="menu-option")
                     yield Button("Save session", id="m-save", classes="menu-option")
                     yield Button("Help", id="m-help", classes="menu-option")
@@ -1289,6 +1335,122 @@ if TEXTUAL_AVAILABLE:
                     pass
             self.dismiss(None)
 
+    class MCPServersScreen(DialogScreen):
+        """Modal listing every MCP server discovered at startup — the bundled
+        ones and the user's own (~/.alexis/mcp) — each with a checkbox to enable
+        or disable it. Saving persists the choices to config.jsonc
+        (``agent.use-mcp-<name>``); because servers are attached at startup the
+        changes take effect on the next launch. Dismisses with a ``{name: bool}``
+        mapping on Save, or None on Cancel / Esc / ✕.
+
+        Based on DialogScreen (not ButtonMenuScreen) so Space toggles the focused
+        checkbox rather than pressing a button; Up/Down move focus between the
+        checkboxes and the Save/Cancel buttons."""
+
+        def __init__(self, servers: List[Dict[str, Any]], config_path: str = "",
+                     **kwargs):
+            super().__init__(**kwargs)
+            self._servers = servers          # [{name, enabled, source}]
+            self._config_path = config_path
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="themed-dialog", id="mcp-dialog"):
+                yield DialogTitleBar("MCP Servers", classes="dialog-title-bar")
+                with Vertical(classes="dialog-body"):
+                    if not self._servers:
+                        yield Static("No MCP servers were discovered.",
+                                     classes="dialog-label")
+                        yield Button("Close", id="mcp-cancel", classes="menu-option")
+                        return
+                    yield Static(
+                        "Enable or disable MCP servers. Changes are saved to "
+                        "config.jsonc and take effect on the next launch.",
+                        classes="dialog-label")
+                    with VerticalScroll(id="mcp-list"):
+                        for i, srv in enumerate(self._servers):
+                            source = srv.get("source", "bundled")
+                            label = f"{srv['name']}  ({source})"
+                            yield Checkbox(label, value=bool(srv.get("enabled")),
+                                           id=f"mcp-cb-{i}", classes="mcp-checkbox")
+                    with Horizontal(classes="dialog-buttons"):
+                        yield Button("Save", id="mcp-save", classes="menu-option")
+                        yield Button("Cancel", id="mcp-cancel", classes="menu-option")
+
+        def on_mount(self) -> None:
+            # Focus the first checkbox so arrows / Space work immediately.
+            try:
+                self.query(Checkbox).first().focus()
+            except Exception:
+                pass
+
+        def on_button_pressed(self, event: "Button.Pressed") -> None:
+            if event.button.id == "mcp-save":
+                states: Dict[str, bool] = {}
+                for i, srv in enumerate(self._servers):
+                    try:
+                        cb = self.query_one(f"#mcp-cb-{i}", Checkbox)
+                        states[srv["name"]] = bool(cb.value)
+                    except Exception:
+                        pass
+                self.dismiss(states)
+            else:
+                self.dismiss(None)
+
+    class SettingsScreen(DialogScreen):
+        """Modal with the textual UI preferences (Menu -> Settings). For now two
+        checkboxes control which right-panel widgets are shown in detailed form:
+
+          - Detailed Statistics — show the full token-statistics panel.
+          - Detailed Context    — show the full context map (off = a compact
+                                   single-bar usage indicator).
+
+        Both default off. Dismisses with a ``{detailed_statistics, detailed_context}``
+        mapping on Save, or None on Cancel / Esc / ✕. Based on DialogScreen so
+        Space toggles the focused checkbox."""
+
+        def __init__(self, detailed_statistics: bool, detailed_context: bool,
+                     **kwargs):
+            super().__init__(**kwargs)
+            self._detailed_statistics = detailed_statistics
+            self._detailed_context = detailed_context
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="themed-dialog", id="settings-dialog"):
+                yield DialogTitleBar("Settings", classes="dialog-title-bar")
+                with Vertical(classes="dialog-body"):
+                    yield Static(
+                        "Choose which right-panel widgets are shown in detailed "
+                        "form. Saved to config.jsonc.",
+                        classes="dialog-label")
+                    yield Checkbox("Detailed Statistics",
+                                   value=bool(self._detailed_statistics),
+                                   id="set-stats", classes="settings-checkbox")
+                    yield Checkbox("Detailed Context",
+                                   value=bool(self._detailed_context),
+                                   id="set-context", classes="settings-checkbox")
+                    with Horizontal(classes="dialog-buttons"):
+                        yield Button("Save", id="settings-save",
+                                     classes="menu-option")
+                        yield Button("Cancel", id="settings-cancel",
+                                     classes="menu-option")
+
+        def on_mount(self) -> None:
+            try:
+                self.query(Checkbox).first().focus()
+            except Exception:
+                pass
+
+        def on_button_pressed(self, event: "Button.Pressed") -> None:
+            if event.button.id == "settings-save":
+                self.dismiss({
+                    "detailed_statistics":
+                        bool(self.query_one("#set-stats", Checkbox).value),
+                    "detailed_context":
+                        bool(self.query_one("#set-context", Checkbox).value),
+                })
+            else:
+                self.dismiss(None)
+
     class HelpScreen(DialogScreen):
         """Modal describing the available controls."""
 
@@ -1300,6 +1462,8 @@ if TEXTUAL_AVAILABLE:
             "  ✕            Exit the agent\n\n"
             "[bold]Menu[/bold]\n"
             "  LLM Provider   Switch the LLM provider for this session\n"
+            "  MCP Servers    Enable/disable MCP servers (saved to config.jsonc)\n"
+            "  Settings       Toggle detailed Statistics / Context side panels\n"
             "  Load session   Load a saved conversation from a JSON file\n"
             "  Save session   Write the current conversation to disk\n"
             "  Help           Show this screen\n"
@@ -1586,6 +1750,10 @@ if TEXTUAL_AVAILABLE:
             height: auto;
             margin-top: 1;
         }
+        #context-bar {
+            height: auto;
+            margin-top: 1;
+        }
         #mcp-servers {
             height: auto;
         }
@@ -1780,7 +1948,7 @@ if TEXTUAL_AVAILABLE:
            name on the left and a ✕ close button on the right, then a padded
            body. Colours come from the same palette as the rest of the UI
            (#1a1a2e panels, #2a2a50 highlights, #4040a0 / #8080ff accents). */
-        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen, ConfirmResetScreen, ProviderScreen {
+        MenuScreen, HelpScreen, LoadScreen, AddFileScreen, TodoScreen, ConfirmResetScreen, ProviderScreen, MCPServersScreen, SettingsScreen {
             align: center middle;
             background: black 55%;
         }
@@ -1790,6 +1958,35 @@ if TEXTUAL_AVAILABLE:
             max-height: 18;
             scrollbar-size-vertical: 1;
         }
+        /* MCP server enable/disable dialog: a scrollable checkbox list. */
+        #mcp-dialog { width: 60; }
+        #mcp-list {
+            height: auto;
+            max-height: 16;
+            margin-bottom: 1;
+            scrollbar-size-vertical: 1;
+        }
+        .mcp-checkbox, .settings-checkbox {
+            width: 1fr;
+            height: auto;
+            border: none;
+            background: #1a1a2e;
+            color: #d0d0e0;
+        }
+        .mcp-checkbox:focus, .settings-checkbox:focus {
+            background: #2a2a50;
+            text-style: bold;
+        }
+        .mcp-checkbox > .toggle--button, .settings-checkbox > .toggle--button {
+            color: #8080ff;
+            background: #0e0e1a;
+        }
+        .mcp-checkbox.-on > .toggle--button, .settings-checkbox.-on > .toggle--button {
+            color: #5fff5f;
+            background: #0e0e1a;
+        }
+        /* Settings dialog: a touch of breathing room between checkboxes. */
+        .settings-checkbox { margin-top: 1; }
         /* Read-only todo plan modal. */
         #todo-dialog { width: 68; }
         #todo-desc {
@@ -1930,9 +2127,20 @@ if TEXTUAL_AVAILABLE:
                      save_state=None, session_path=None, thinking_enabled=False,
                      mcp_servers=None, skills_count=None, reset_session=None,
                      join_tool_processing=True, todo_provider=None,
-                     session_reset=None, provider_info=None, set_provider=None):
+                     session_reset=None, provider_info=None, set_provider=None,
+                     mcp_info=None, set_mcp_servers=None,
+                     detailed_statistics=False, detailed_context=False,
+                     set_ui_settings=None):
             super().__init__()
             self.context_limit = context_limit
+            # Right-panel detail toggles (Menu -> Settings), both off by default.
+            # `detailed_statistics` shows the full token-stats panel; when off it
+            # is hidden. `detailed_context` shows the full context map; when off a
+            # compact single-bar usage indicator (ContextBar) is shown instead.
+            # `set_ui_settings` persists the choices to config.jsonc.
+            self.detailed_statistics = bool(detailed_statistics)
+            self.detailed_context = bool(detailed_context)
+            self.set_ui_settings_cb = set_ui_settings
             # Provider switching (Menu -> LLM Provider). `provider_info` is a
             # zero-arg callable returning {providers, default, current} or None
             # when no providers are configured; `set_provider` switches the
@@ -1940,6 +2148,12 @@ if TEXTUAL_AVAILABLE:
             self.provider_info = provider_info
             self.set_provider_cb = set_provider
             self.current_provider: Optional[str] = None
+            # MCP server enable/disable (Menu -> MCP Servers). `mcp_info` is a
+            # zero-arg callable returning {servers, config_path} or None when no
+            # MCP servers were discovered; `set_mcp_servers` persists a
+            # {name: bool} mapping to config.jsonc and returns the config path.
+            self.mcp_info = mcp_info
+            self.set_mcp_servers_cb = set_mcp_servers
             # Async callable that fetches the current todo plan over MCP, or None
             # when the todo server isn't attached — drives whether the TODO side
             # panel shows and how it gets its data.
@@ -1985,6 +2199,7 @@ if TEXTUAL_AVAILABLE:
                         yield SkillsPanel(self.skills_count, id="skills")
                     yield StatisticsPanel(id="stats-numbers")
                     yield ContextMap(id="context-map")
+                    yield ContextBar(id="context-bar")
             yield MultiLineInput(id="input")
 
         def on_mount(self) -> None:
@@ -1999,6 +2214,8 @@ if TEXTUAL_AVAILABLE:
             })
             # Match the sidebar to the current terminal width right away.
             self._update_stats_visibility(self.size.width)
+            # Apply the right-panel detail toggles (Settings dialog / config).
+            self._apply_detail_settings()
             # Seed the provider label from the backend's current provider.
             if self.provider_info:
                 try:
@@ -2008,6 +2225,36 @@ if TEXTUAL_AVAILABLE:
                 except Exception:
                     pass
             self._update_provider_label(self.current_provider)
+            # Show any resumed conversation so the user can see the prior context
+            # and pick up where they left off. Rendering mounts widgets, so defer
+            # it until after the first refresh (the ConversationView is ready by
+            # then) and run the async rebuild in a worker.
+            if self._has_renderable_history():
+                self.call_after_refresh(
+                    lambda: self.run_worker(self._show_initial_history(),
+                                            exclusive=False))
+
+        def _has_renderable_history(self) -> bool:
+            """True when self.messages holds prior conversation worth showing on
+            startup (anything beyond the system prompt)."""
+            return any(m.get("role") in ("user", "assistant", "tool")
+                       for m in self.messages)
+
+        async def _show_initial_history(self) -> None:
+            """Render the resumed session's messages into the transcript and hint
+            the user how to continue."""
+            await self._rebuild_transcript()
+            try:
+                self.query_one(ConversationView, ConversationView).scroll_end(
+                    animate=False)
+            except Exception:
+                pass
+            turns = sum(1 for m in self.messages
+                        if m.get("role") in ("user", "assistant"))
+            self.notify(
+                f"Resumed session — {turns} message(s) restored. "
+                "Keep typing to continue, or /reset to start fresh.",
+                title="Session restored", timeout=6)
 
         def _update_provider_label(self, name: Optional[str]) -> None:
             """Set the 'provider: <name>' text shown next to the Reset button."""
@@ -2016,6 +2263,19 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 return
             label.update(f"provider: {name}" if name else "provider: —")
+
+        def _apply_detail_settings(self) -> None:
+            """Show/hide the right-panel widgets per the detail toggles: the full
+            stats panel only when Detailed Statistics is on, and either the full
+            context map (Detailed Context on) or the compact ContextBar (off)."""
+            def _set(selector: str, visible: bool) -> None:
+                try:
+                    self.query_one(selector).display = visible
+                except Exception:
+                    pass
+            _set("#stats-numbers", self.detailed_statistics)
+            _set("#context-map", self.detailed_context)
+            _set("#context-bar", not self.detailed_context)
 
         def on_resize(self, event: events.Resize) -> None:
             """Show/hide the stats sidebar as the terminal is resized."""
@@ -2140,8 +2400,10 @@ if TEXTUAL_AVAILABLE:
             elif message.action == "command":
                 self.action_command_palette()
             elif message.action == "menu":
-                self.push_screen(MenuScreen(show_provider=bool(self.provider_info)),
-                                 self._on_menu_result)
+                self.push_screen(
+                    MenuScreen(show_provider=bool(self.provider_info),
+                               show_mcp=bool(self.mcp_info)),
+                    self._on_menu_result)
 
         def _on_menu_result(self, result: Optional[str]) -> None:
             if result == "m-exit":
@@ -2156,6 +2418,73 @@ if TEXTUAL_AVAILABLE:
                 self.push_screen(AddFileScreen(), self._on_addfile_result)
             elif result == "m-provider":
                 self._open_provider_dialog()
+            elif result == "m-mcp":
+                self._open_mcp_dialog()
+            elif result == "m-settings":
+                self._open_settings_dialog()
+
+        # ── Settings (right-panel detail toggles) ────────────────
+        def _open_settings_dialog(self) -> None:
+            """Open the Settings dialog (Menu -> Settings)."""
+            self.push_screen(
+                SettingsScreen(self.detailed_statistics, self.detailed_context),
+                self._on_settings_result,
+            )
+
+        def _on_settings_result(self, states: Optional[Dict[str, bool]]) -> None:
+            """Apply the chosen detail toggles live and persist them."""
+            if not states:
+                return
+            self.detailed_statistics = bool(states.get("detailed_statistics"))
+            self.detailed_context = bool(states.get("detailed_context"))
+            self._apply_detail_settings()
+            if self.set_ui_settings_cb:
+                try:
+                    self.set_ui_settings_cb(states)
+                except Exception as e:
+                    self.notify(f"Could not save settings: {e}",
+                                severity="warning", timeout=4)
+                    return
+            self.notify("Settings saved.", severity="information", timeout=3)
+
+        # ── MCP server enable/disable ────────────────────────────
+        def _open_mcp_dialog(self) -> None:
+            """Open the MCP-servers enable/disable dialog (Menu -> MCP Servers)."""
+            if not self.mcp_info:
+                self.notify("No MCP servers available.",
+                            severity="warning", timeout=3)
+                return
+            try:
+                info = self.mcp_info()
+            except Exception as e:
+                self.notify(f"Cannot read MCP servers: {e}",
+                            severity="error", timeout=4)
+                return
+            if not info or not info.get("servers"):
+                self.notify("No MCP servers were discovered.",
+                            severity="warning", timeout=3)
+                return
+            self.push_screen(
+                MCPServersScreen(info.get("servers") or [],
+                                 info.get("config_path", "")),
+                self._on_mcp_result,
+            )
+
+        def _on_mcp_result(self, states: Optional[Dict[str, bool]]) -> None:
+            """Persist the checkbox selection chosen in the MCP dialog."""
+            if not states:
+                return
+            if not self.set_mcp_servers_cb:
+                return
+            try:
+                path = self.set_mcp_servers_cb(states)
+            except Exception as e:
+                self.notify(f"Save failed: {e}", severity="error", timeout=4)
+                return
+            self.notify(
+                f"MCP server selection saved to {path or 'config.jsonc'} — "
+                "applies on the next launch.",
+                severity="information", timeout=5)
 
         # ── LLM provider switching ───────────────────────────────
         def _open_provider_dialog(self) -> None:
@@ -2434,9 +2763,14 @@ if TEXTUAL_AVAILABLE:
                             severity="information", timeout=3)
 
         def update_stats(self, new_stats: Dict[str, Any]) -> None:
-            """Update statistics panel and context map."""
+            """Update the statistics panel, context map and compact context bar
+            (the hidden ones are updated too so they're current when shown)."""
             self.query_one(StatisticsPanel, StatisticsPanel).update_stats(new_stats)
             self.query_one(ContextMap, ContextMap).update_stats(new_stats)
+            try:
+                self.query_one(ContextBar, ContextBar).update_stats(new_stats)
+            except Exception:
+                pass
 
         def on_input_submitted(self, message: "InputSubmitted") -> None:
             """Handle input submission — may carry text + attachments."""
@@ -2749,6 +3083,11 @@ class TextualInteractiveUIDriver(UIDriver):
                 session_reset=kwargs.get("session_reset"),
                 provider_info=kwargs.get("provider_info"),
                 set_provider=kwargs.get("set_provider"),
+                mcp_info=kwargs.get("mcp_info"),
+                set_mcp_servers=kwargs.get("set_mcp_servers"),
+                detailed_statistics=kwargs.get("detailed_statistics", False),
+                detailed_context=kwargs.get("detailed_context", False),
+                set_ui_settings=kwargs.get("set_ui_settings"),
             )
             await app.run_async()
             save_state()
